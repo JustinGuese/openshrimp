@@ -11,10 +11,8 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
-  {{- if .Values.ingress.className }}
   ingressClassName: {{ .Values.ingress.className }}
-  {{- end }}
-  {{- if .Values.ingress.tls }}
+  {{- if and .Values.ingress.tls (gt (len .Values.ingress.tls) 0) }}
   tls:
     {{- range .Values.ingress.tls }}
     - hosts:
@@ -30,7 +28,7 @@ spec:
       http:
         paths:
           {{- range .paths }}
-          - path: {{ .path }}
+          - path: {{ .path | quote }}
             pathType: {{ .pathType | default "Prefix" }}
             backend:
               service:
