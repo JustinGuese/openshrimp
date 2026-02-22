@@ -28,7 +28,7 @@ _src = Path(__file__).resolve().parent
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
@@ -157,11 +157,15 @@ def _build_project_keyboard(
 
 
 def _get_or_create_user(session: Session, user_id: int, name: str, email: str) -> User:
-    """Return existing user or create one. If user_id==0, always create."""
+    """Return existing user by id, then by email, or create one."""
     if user_id:
         user = session.get(User, user_id)
         if user:
             return user
+    # Fall back to lookup by email so restarts don't create duplicate users
+    existing = session.exec(select(User).where(User.email == email)).first()
+    if existing:
+        return existing
     user = User(name=name, email=email, passwordhash="")
     session.add(user)
     session.commit()
