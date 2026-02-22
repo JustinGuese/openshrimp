@@ -8,6 +8,6 @@ COPY pyproject.toml uv.lock ./
 ENV UV_SYSTEM_PYTHON=1
 RUN uv sync --no-dev --frozen
 
-COPY src/ ./src/
+COPY src/ .
 
 CMD ["python", "telegram_bot.py"]

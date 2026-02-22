@@ -64,14 +64,14 @@ browserless:
     tag: latest
     pullPolicy: IfNotPresent
   port: 3000
-  shmSize: "2gb"
+  shmSize: "2Gi"
   resources:
     limits:
       cpu: "1"
-      memory: 2G
-    reservations:
-      cpu: "0.025"
-      memory: 128M
+      memory: "2Gi"
+    requests:
+      cpu: "25m"
+      memory: "128Mi"
 
 # ---- Service account ----
 serviceAccount:
