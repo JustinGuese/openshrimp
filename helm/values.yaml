@@ -25,11 +25,11 @@ frontend:
   resources: {}
   livenessProbe:
     httpGet:
-      path: /
+      path: /healthz
       port: 8000
   readinessProbe:
     httpGet:
-      path: /
+      path: /healthz
       port: 8000
 
 # ---- Agent (Telegram bot) ----

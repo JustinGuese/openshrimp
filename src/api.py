@@ -62,6 +62,12 @@ def log_unhandled_exception(request: Request, exc: Exception):
     )
 
 
+@app.get("/healthz")
+def healthz() -> dict[str, str]:
+    """No-auth health check for load balancers and k8s/docker probes."""
+    return {"status": "ok"}
+
+
 def get_session():
     """Dependency that yields a DB session. Routes commit when mutating; session is closed on exit."""
     session = Session(db.get_engine())
