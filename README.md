@@ -4,12 +4,38 @@
   <img src="logo.jpg" alt="openShrimp" width="280" />
 </p>
 
+<p align="center">
+  <img src="docs/telegram.png" alt="openShrimp in Telegram — chat with the bot to run research tasks" width="400" />
+</p>
+<p align="center"><em>Use openShrimp in Telegram: send a message, get research. <code>/dashboard</code> for your task board.</em></p>
+
 Persistent, task-driven LangGraph research agent with a modular plugin system, PostgreSQL-backed state, and a zero-setup Telegram interface.
 
 > Think OpenClaw with task planning, less token usage and better anti-bot-measure avoidance
 
+<p align="center">
+  <img src="docs/dashboard.png" alt="Task tracking dashboard — Trello-style board and searchable table" width="720" />
+</p>
+<p align="center"><em>Task tracking dashboard: Trello-style board and searchable table. Get your link via <code>/dashboard</code> in Telegram.</em></p>
 
-## Why openShrimp Exists
+
+## TL;DR — Quickstart (hosted)
+
+**No setup.** Use the hosted version: smaller AI model, but **free** and ready to go.
+
+1. Open [**@OpenShrimpBot**](https://t.me/OpenShrimpBot) in Telegram.
+2. Send a message and start researching.
+
+For **paid premium hosted plans** (larger models, higher limits), contact [**info@datafortress.cloud**](mailto:info@datafortress.cloud).
+
+
+
+## Self-hosted / Development
+
+The rest of this README describes running openShrimp yourself (self-hosted or local development).
+
+
+### Why openShrimp Exists
 
 I built openShrimp because I was frustrated with [OpenClaw](https://github.com/OpenClaw/OpenClaw).
 
@@ -18,7 +44,7 @@ OpenClaw is an impressive autonomous research agent, and I respect the project. 
 Here's what was missing:
 
 
-### 1. Task Tracking That Actually Persists
+#### 1. Task Tracking That Actually Persists
 
 OpenClaw operates in an ephemeral loop. Once the conversation ends, the work is gone. There's no record, no audit trail, no way to come back to a half-finished task.
 
@@ -27,7 +53,7 @@ I needed a **database-backed task system** with real states: `pending`, `in_prog
 openShrimp treats research as structured, inspectable work — not disposable prompt output.
 
 
-### 2. Works Until It's Done
+#### 2. Works Until It's Done
 
 This is the one that drove me crazy. With most agents you end up babysitting:
 
@@ -38,7 +64,7 @@ This is the one that drove me crazy. With most agents you end up babysitting:
 openShrimp doesn't need that. You give it a task, it picks it up, and it works on it until it's done — or until it genuinely needs your input, at which point it asks you directly in Telegram and waits for your reply. No repeated nudging. No re-triggering. It just works.
 
 
-### 3. You Can See What's Happening
+#### 3. You Can See What's Happening
 
 OpenClaw feels like a black box while it runs. You send a message, you wait, and eventually something comes back.
 
@@ -51,7 +77,7 @@ openShrimp gives you full observability:
 * Clear separation between orchestration, memory, and tool execution — you know where everything lives
 
 
-### 4. Plugin Workshop
+#### 4. Plugin Workshop
 
 I wanted to extend the agent without touching the core. openShrimp uses a dead-simple plugin system:
 
@@ -66,7 +92,7 @@ Each plugin exports a list of `@tool`-decorated functions. The core agent loads 
 Want to add a new research capability? Write a `tool.py`, add a `manifest.json`, done. That's the whole process.
 
 
-### 5. Pure Telegram — Zero UI Friction
+#### 5. Pure Telegram — Zero UI Friction
 
 Setup is:
 
@@ -78,7 +104,7 @@ Setup is:
 No web UI to deploy. No frontend to configure. Telegram is the interface. Send a message, get a research result. Send `/status` to see what's running. Send `/dashboard` to get a link to your personal web dashboard.
 
 
-### 6. Stealth Web Research That Actually Works
+#### 6. Stealth Web Research That Actually Works
 
 This was the other big pain point. OpenClaw's browser gets blocked constantly — anti-bot detection, CAPTCHAs, fingerprinting. Every other research task would stall because a website refused to serve the page.
 
@@ -93,7 +119,7 @@ openShrimp uses a hardened browsing stack:
 The result: long-running research sessions that don't get interrupted by "please verify you're human" walls.
 
 
-## What openShrimp Is
+### What openShrimp Is
 
 * A **LangGraph-based** autonomous research agent
 * With **persistent task tracking** in PostgreSQL
@@ -105,7 +131,7 @@ The result: long-running research sessions that don't get interrupted by "please
 It is not a demo agent. It is designed to behave like a structured autonomous worker.
 
 
-## Dashboard Access
+### Dashboard Access
 
 The web dashboard (task board and table) is **locked by default**. Access requires a secret token in the URL.
 
@@ -128,7 +154,7 @@ The web dashboard (task board and table) is **locked by default**. Access requir
 | `DASHBOARD_BASE_URL` | Base URL for dashboard links the bot sends (default: `http://localhost:8000`). Set to your public URL for production. |
 
 
-## Deploying with Helm (Kubernetes)
+### Deploying with Helm (Kubernetes)
 
 Deploy openShrimp to a Kubernetes cluster using the included Helm chart. The chart runs the same stack as docker-compose: frontend (API/visualizer), agent (Telegram bot), pgvector, and browserless.
 
