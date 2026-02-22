@@ -1,0 +1,13 @@
+{
+  "name": "telegram_notify",
+  "description": "Send a proactive update message to the Telegram user while the agent is still working.",
+  "version": "0.1.0",
+  "tags": ["telegram", "notify"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "message": {"type": "string", "description": "The message to send to the user"}
+    },
+    "required": ["message"]
+  }
+}

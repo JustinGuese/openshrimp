@@ -1,0 +1,102 @@
+# Default values for openShrimp Helm chart.
+# Values structure mirrors docker-compose: frontend, agent, pgvector, browserless.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Secret created from .env (user must create: kubectl create secret generic openshrimp-env --from-env-file=.env)
+existingSecret: openshrimp-env
+
+# ---- App image (frontend + agent) ----
+image:
+  repository: guestros/openshrimp
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+
+# ---- Frontend (uvicorn API / visualizer) ----
+frontend:
+  enabled: true
+  replicaCount: 1
+  port: 8000
+  # Override DASHBOARD_BASE_URL for Telegram dashboard links (optional; can be set in .env)
+  dashboardBaseUrl: "https://openshrimp.datafortress.cloud"
+  resources: {}
+  livenessProbe:
+    httpGet:
+      path: /
+      port: 8000
+  readinessProbe:
+    httpGet:
+      path: /
+      port: 8000
+
+# ---- Agent (Telegram bot) ----
+agent:
+  enabled: true
+  replicaCount: 1
+  resources: {}
+  persistence:
+    enabled: true
+    size: 500Mi
+    # storageClassName: ""  # default storage class
+
+# ---- pgvector (PostgreSQL + pgvector) ----
+pgvector:
+  enabled: true
+  image:
+    repository: pgvector/pgvector
+    tag: pg16
+    pullPolicy: IfNotPresent
+  port: 5432
+  resources: {}
+  persistence:
+    enabled: true
+    size: 500Mi
+    # storageClassName: ""  # default storage class
+
+# ---- Browserless (Chrome) ----
+browserless:
+  enabled: true
+  image:
+    repository: browserless/chrome
+    tag: latest
+    pullPolicy: IfNotPresent
+  port: 3000
+  shmSize: "2gb"
+  resources:
+    limits:
+      cpu: "1"
+      memory: 2G
+    reservations:
+      cpu: "0.025"
+      memory: 128M
+
+# ---- Service account ----
+serviceAccount:
+  create: true
+  automount: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+podSecurityContext: {}
+securityContext: {}
+
+# ---- Ingress (cloudflared → frontend visualizer) ----
+ingress:
+  enabled: true
+  className: cloudflared
+  annotations: {}
+  hosts:
+    - host: openshrimp.datafortress.cloud
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

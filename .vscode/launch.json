@@ -1,0 +1,32 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python Debugger: FastAPI",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["api:app", "--reload"],
+      "envFile": "${workspaceFolder}/.env",
+      "cwd": "${workspaceFolder}/src",
+      "jinja": true
+    },
+    {
+      "name": "Python Debugger: Current File",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}/src",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "BROWSERLESS_WS_URL": "http://localhost:3000",
+        "RESEARCH_QUERY": "research the best social media automation api. i need something which allows me to post to an endpoint, and it automatically posts to x, tiktok and instagram. focus should be on cheap",
+        "DASHBOARD_BASE_URL" : "http://localhost:8000"
+      }
+    }
+  ]
+}

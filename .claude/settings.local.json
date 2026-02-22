@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3:*)",
+      "Bash(cd /c/code/openshrimp && python -c \"import sys; sys.path.insert\\(0, 'src'\\); from plugin_loader import load_plugins; tools = load_plugins\\(\\); print\\(f'Loaded {len\\(tools\\)} tool\\(s\\)'\\); print\\(f'Tool names: {[t.name for t in tools]}'\\)\" 2>&1)",
+      "Bash(tail:*)",
+      "Bash(cd /c/code/openshrimp && uv run python -c \"import sys; sys.path.insert\\(0, 'src'\\); from plugin_loader import load_plugins; tools = load_plugins\\(\\); print\\(f'Loaded {len\\(tools\\)} tool\\(s\\)'\\); print\\(f'Tool names: {[t.name for t in tools]}'\\)\" 2>&1)",
+      "Bash(cd /c/code/openshrimp && uv run python -c \"import sys; sys.path.insert\\(0, 'src'\\); from agent import TOOLS, TOOLS_BY_NAME, create_research_agent; print\\(f'Agent loaded with {len\\(TOOLS\\)} tool\\(s\\)'\\); print\\(f'Tools: {list\\(TOOLS_BY_NAME.keys\\(\\)\\)}'\\); agent = create_research_agent\\(\\); print\\('Agent compiled successfully'\\)\" 2>&1)",
+      "Bash(cd:*)",
+      "Bash(ls:*)",
+      "Bash(cd /c/code/openshrimp && uv run python -c \"from dotenv import load_dotenv; print\\('dotenv ok'\\)\" 2>&1)"
+    ]
+  }
+}

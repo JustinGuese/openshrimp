@@ -1,0 +1,14 @@
+{
+  "name": "human_input",
+  "description": "Ask the human user a question and wait for their reply. Use when you need clarification before continuing. Blocks until the user responds or timeout expires.",
+  "version": "0.1.0",
+  "tags": ["telegram", "human", "input"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "question": {"type": "string"},
+      "timeout_seconds": {"type": "integer", "default": 600}
+    },
+    "required": ["question"]
+  }
+}

@@ -1,0 +1,18 @@
+{{- if .Values.agent.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "openshrimp.agentFullname" . }}
+  labels:
+    {{- include "openshrimp.labels" . | nindent 4 }}
+    {{- include "openshrimp.agentSelectorLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 80
+      protocol: TCP
+      name: placeholder
+  selector:
+    {{- include "openshrimp.agentSelectorLabels" . | nindent 4 }}
+{{- end }}

@@ -1,0 +1,19 @@
+.board-column {
+  min-width: 220px;
+  max-width: 280px;
+}
+.board .card {
+  min-height: 400px;
+}
+.board-column-cards {
+  min-height: 320px;
+}
+.task-card {
+  cursor: grab;
+}
+.task-card:active {
+  cursor: grabbing;
+}
+.task-card.dragging {
+  opacity: 0.5;
+}

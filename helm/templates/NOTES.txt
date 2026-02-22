@@ -1,0 +1,17 @@
+1. OpenShrimp has been deployed.
+
+2. Visualizer (dashboard) URL:
+   {{- if and .Values.ingress.enabled (index .Values.ingress.hosts 0) }}
+   https://{{ (index .Values.ingress.hosts 0).host }}
+   {{- else if .Values.ingress.enabled }}
+   (No host configured; set ingress.hosts in values.yaml.)
+   {{- else }}
+   (Ingress disabled; use port-forward to frontend service.)
+   {{- end }}
+   Override via ingress.hosts in values.yaml if needed.
+
+3. Ensure the env secret exists so pods can start. If you have not already:
+   kubectl create secret generic {{ .Values.existingSecret }} --from-env-file=.env
+
+
+4. Send /dashboard in Telegram to get your personal dashboard link.

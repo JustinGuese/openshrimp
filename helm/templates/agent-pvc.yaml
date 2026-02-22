@@ -1,0 +1,18 @@
+{{- if and .Values.agent.enabled .Values.agent.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "openshrimp.agentFullname" . }}-workspace
+  labels:
+    {{- include "openshrimp.labels" . | nindent 4 }}
+    {{- include "openshrimp.agentSelectorLabels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.agent.persistence.size }}
+  {{- if .Values.agent.persistence.storageClassName }}
+  storageClassName: {{ .Values.agent.persistence.storageClassName }}
+  {{- end }}
+{{- end }}

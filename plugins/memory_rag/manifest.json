@@ -1,0 +1,12 @@
+{
+  "name": "memory_rag",
+  "description": "Store and retrieve information in long-term memory using semantic search (PGVector RAG).",
+  "version": "0.1.0",
+  "tags": ["memory", "rag", "pgvector", "retrieval"],
+  "input_schema": {
+    "type": "object",
+    "description": "memory_add: content (required), source (optional). memory_retrieve: query (required), top_k (optional, default 5).",
+    "properties": {},
+    "required": []
+  }
+}

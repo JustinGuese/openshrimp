@@ -1,0 +1,54 @@
+
+services:
+  openshrimp-frontend:
+    image: guestros/openshrimp:latest
+    build: .
+    command: uvicorn api:app --host 0.0.0.0 --port 8000
+    ports:
+      - 8000:8000
+    env_file:
+      - .env
+    depends_on:
+      - openshrimp-agent
+
+  openshrimp-agent:
+    image: guestros/openshrimp:latest
+    build: .
+    command: python telegram_bot.py
+    environment:
+      - "BROWSERLESS_WS_URL=http://browserless:3000"
+      - "DASHBOARD_BASE_URL=http://openshrimp-frontend:8000"
+    env_file:
+      - .env
+    volumes: 
+      - openshrimp-agent-workspace:/app/plugins/filesystem/workspaces
+    depends_on:
+      - pgvector
+      - browserless
+
+  pgvector:
+    image: pgvector/pgvector:pg16
+    ports:
+      - 5432:5432
+    volumes:
+      - openshrimp-pgvector-data:/var/lib/postgresql/data
+    env_file:
+      - .env
+
+  browserless:
+    image: browserless/chrome:latest
+    ports:
+      - 3000:3000
+    shm_size: 2gb
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 2G
+        reservations:
+          cpus: "0.025"
+          memory: 128M
+
+volumes:
+  openshrimp-agent-workspace:
+  openshrimp-pgvector-data:

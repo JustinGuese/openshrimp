@@ -1,0 +1,89 @@
+{{- if .Values.agent.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "openshrimp.agentFullname" . }}
+  labels:
+    {{- include "openshrimp.labels" . | nindent 4 }}
+    {{- include "openshrimp.agentSelectorLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.agent.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "openshrimp.agentSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openshrimp.agentSelectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "openshrimp.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: agent
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python
+            - telegram_bot.py
+          ports:
+            - name: placeholder
+              containerPort: 80
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: {{ .Values.existingSecret }}
+          env:
+            - name: BROWSERLESS_WS_URL
+              value: "http://{{ include "openshrimp.browserlessFullname" . }}:{{ .Values.browserless.port }}"
+            - name: POSTGRES_HOST
+              value: {{ include "openshrimp.pgvectorFullname" . | quote }}
+            - name: POSTGRES_PORT
+              value: {{ .Values.pgvector.port | default "5432" | quote }}
+            - name: DASHBOARD_BASE_URL
+              value: {{ .Values.frontend.dashboardBaseUrl | quote }}
+          {{- if .Values.agent.persistence.enabled }}
+          volumeMounts:
+            - name: workspace
+              mountPath: /app/plugins/filesystem/workspaces
+          {{- end }}
+          {{- with .Values.agent.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- if .Values.agent.persistence.enabled }}
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: {{ include "openshrimp.agentFullname" . }}-workspace
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

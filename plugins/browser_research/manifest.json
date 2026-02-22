@@ -1,0 +1,14 @@
+{
+  "name": "browser_research",
+  "description": "Visit a URL in a headless browser and extract main text content for research.",
+  "version": "0.1.0",
+  "tags": ["web", "browser", "research"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "url": {"type": "string", "description": "Full URL to open"},
+      "instruction": {"type": "string", "description": "What to find on the page", "default": ""}
+    },
+    "required": ["url"]
+  }
+}
