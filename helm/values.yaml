@@ -10,7 +10,7 @@ existingSecret: openshrimp-env
 # ---- App image (frontend + agent) ----
 image:
   repository: guestros/openshrimp
-  pullPolicy: IfNotPresent
+  pullPolicy: Always # we just build on latest tag to save space
   tag: "latest"
 
 imagePullSecrets: []

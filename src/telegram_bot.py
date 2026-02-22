@@ -28,10 +28,6 @@ _src = Path(__file__).resolve().parent
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 from sqlmodel import Session
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
