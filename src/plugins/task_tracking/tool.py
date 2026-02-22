@@ -12,7 +12,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 # Ensure src/ is on sys.path when loaded via plugin loader
-_src = Path(__file__).resolve().parents[2] / "src"
+_src = Path(__file__).resolve().parents[2]
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 

@@ -29,5 +29,5 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["plugins", "tests"]
+testpaths = ["src/plugins", "tests"]
 pythonpath = ["src"]

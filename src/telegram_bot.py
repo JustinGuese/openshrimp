@@ -65,6 +65,10 @@ DEFAULT_CHAT_LEVEL = "INFO"
 # Prefix for all bot-originated messages
 BOT_PREFIX = "🦐 "
 
+# Telegram message length limit (API returns 400 if exceeded)
+TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+TELEGRAM_CHUNK_SIZE = 4090
+
 # Inline keyboard for /status: Refresh button
 STATUS_REFRESH_DATA = "status:refresh"
 
@@ -82,6 +86,27 @@ class _ProjectPending:
 
 
 _pending_project: dict[int, _ProjectPending] = {}  # keyed by chat_id
+
+
+def _chunk_text(text: str, max_len: int = TELEGRAM_CHUNK_SIZE) -> list[str]:
+    """Split text into chunks at or under max_len, preferring newline boundaries."""
+    if len(text) <= max_len:
+        return [text] if text else []
+    chunks = []
+    rest = text
+    while rest:
+        if len(rest) <= max_len:
+            chunks.append(rest)
+            break
+        segment = rest[: max_len + 1]
+        last_nl = segment.rfind("\n")
+        if last_nl > max_len // 2:
+            split = last_nl + 1
+        else:
+            split = max_len
+        chunks.append(rest[:split].rstrip())
+        rest = rest[split:].lstrip()
+    return chunks
 
 
 def _is_telegram_valid_url(url: str) -> bool:
@@ -281,10 +306,12 @@ def _run_agent_in_thread(
         answer = BOT_PREFIX + f"✅ Task #{task_id} completed:\n\n{body}\n\n---\nTask: {task_title}"
 
     try:
-        asyncio.run_coroutine_threadsafe(
-            app.bot.send_message(chat_id=chat_id, text=answer),
-            loop,
-        ).result(timeout=30)
+        chunks = _chunk_text(answer)
+        for chunk in chunks:
+            asyncio.run_coroutine_threadsafe(
+                app.bot.send_message(chat_id=chat_id, text=chunk),
+                loop,
+            ).result(timeout=30)
     except Exception as e:
         logger.error("Failed to send final answer to chat %s: %s", chat_id, e)
 

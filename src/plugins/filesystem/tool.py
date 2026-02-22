@@ -1,6 +1,6 @@
 """Filesystem tool for openshrimp plugin system.
 
-Project-scoped file and folder operations. Workspace root: plugins/filesystem/workspaces/<project_id>/.
+Project-scoped file and folder operations. Workspace root: src/plugins/filesystem/workspaces/<project_id>/.
 All paths are relative to that directory. Use search_replace_file for targeted edits; if old_string
 is not found, use write_file to replace the whole file. run_command runs terminal commands with
 the project workspace as the current working directory.
@@ -14,7 +14,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 # Add src directory to path so we can import schemas when run standalone or via plugin loader
-_src = Path(__file__).resolve().parents[2] / "src"
+_src = Path(__file__).resolve().parents[2]
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 

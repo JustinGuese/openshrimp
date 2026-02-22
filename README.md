@@ -56,12 +56,12 @@ openShrimp gives you full observability:
 I wanted to extend the agent without touching the core. openShrimp uses a dead-simple plugin system:
 
 ```
-plugins/<name>/
+src/plugins/<name>/
   manifest.json
   tool.py
 ```
 
-Each plugin exports a list of `@tool`-decorated functions. The core agent loads them automatically on startup. No external protocol, no separate service, no boilerplate. Just drop a folder in `plugins/` and it works.
+Each plugin exports a list of `@tool`-decorated functions. The core agent loads them automatically on startup. No external protocol, no separate service, no boilerplate. Just drop a folder in `src/plugins/` and it works.
 
 Want to add a new research capability? Write a `tool.py`, add a `manifest.json`, done. That's the whole process.
 

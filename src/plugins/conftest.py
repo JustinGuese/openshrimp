@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 
 PLUGINS_DIR = Path(__file__).resolve().parent
-REPO_ROOT = PLUGINS_DIR.parent
-SRC_DIR = REPO_ROOT / "src"
+SRC_DIR = PLUGINS_DIR.parent
+REPO_ROOT = SRC_DIR.parent
 
 for path in (SRC_DIR, REPO_ROOT):
     if str(path) not in sys.path:

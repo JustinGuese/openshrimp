@@ -11,7 +11,7 @@ from schemas import PluginManifest
 
 logger = logging.getLogger(__name__)
 
-PLUGINS_DIR = Path(__file__).resolve().parent.parent / "plugins"
+PLUGINS_DIR = Path(__file__).resolve().parent / "plugins"
 
 # Tool name -> list of plugin tags (e.g. "research"); populated by load_plugins().
 TOOL_PLUGIN_TAGS: dict[str, list[str]] = {}

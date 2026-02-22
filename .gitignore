@@ -12,4 +12,4 @@ wheels/
 .venv
 
 # Filesystem plugin project workspaces (user content)
-plugins/filesystem/workspaces/
+src/plugins/filesystem/workspaces/

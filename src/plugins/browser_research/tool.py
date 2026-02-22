@@ -17,7 +17,7 @@ from pyppeteer import connect, launch
 from pyppeteer_stealth import stealth
 
 # Add src directory to path so we can import schemas when run standalone
-_src = Path(__file__).resolve().parents[2] / "src"
+_src = Path(__file__).resolve().parents[2]
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
