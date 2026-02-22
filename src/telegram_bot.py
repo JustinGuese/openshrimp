@@ -331,7 +331,9 @@ async def cmd_start(update: Update, context) -> None:
         "/status — see active tasks + dashboard link\n"
         "/dashboard — get your personal task dashboard\n"
         "/loglevel — toggle verbosity (INFO/DEBUG)\n\n"
-        "Just type your question to get started."
+        "Just type your question to get started.\n\n"
+        "For paid premium hosted plans (larger models, higher limits), "
+        "contact info@datafortress.cloud."
     )
     if _LOGO_PATH.is_file():
         try:

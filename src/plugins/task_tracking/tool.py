@@ -134,11 +134,17 @@ def update_task_status(task_id: int, status: str) -> str:
     """Update a task's status.
 
     Use this when the user wants to mark a task as in progress, completed, or failed.
+    NOTE: Cannot be used for 'completed' or 'failed' — use update_task() with notes instead.
 
     Args:
         task_id: The task ID.
-        status: One of pending, in_progress, completed, failed, waiting_for_human.
+        status: One of pending, in_progress, waiting_for_human. (Use update_task for completed/failed.)
     """
+    if status in ("completed", "failed"):
+        return _err(
+            f"Cannot set status to '{status}' without a final summary. "
+            f"Use update_task(task_id={task_id}, status='{status}', notes='## Result\\n<your thorough summary>') instead."
+        )
     try:
         task_service.update_task(task_id, status=status)
         return _ok(f"Task id={task_id} status updated to {status}.")
@@ -155,8 +161,13 @@ def update_task(task_id: int, status: str | None = None, notes: str | None = Non
     Args:
         task_id: The task ID (from the [Your task ID is #N] in your context).
         status: Optional new status: pending, in_progress, completed, failed.
-        notes: Optional text to append to the task description (findings, URLs, etc.).
+        notes: Text to append to the task description. REQUIRED when status is 'completed' or 'failed'.
     """
+    if status in ("completed", "failed") and not (notes and notes.strip()):
+        return _err(
+            f"Cannot set status to '{status}' without notes. "
+            f"You must provide a final summary in the notes parameter (e.g. '## Result\\n<your findings>')."
+        )
     try:
         task_service.update_task(task_id, status=status, notes=notes)
         return _ok(f"Task id={task_id} updated.")
