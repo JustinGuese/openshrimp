@@ -1,13 +1,26 @@
 """Pydantic schemas for the Tasks REST API (request/response only)."""
 
-from models import Priority, Task, TaskBase, TaskStatus
+from datetime import datetime
+
+from models import Effort, Priority, Task, TaskBase, TaskStatus
 from sqlmodel import SQLModel
 
 
-class TaskRead(Task, table=False):
-    """Task response schema: same shape as Task, no table."""
+class TaskRead(SQLModel):
+    """Task response schema: explicit fields only (no ORM inheritance) so Pydantic serialization never sees InstrumentedAttribute."""
 
-    model_config = {"from_attributes": True}
+    id: int
+    title: str
+    user_id: int
+    project_id: int
+    description: str
+    status: TaskStatus
+    priority: Priority
+    assignee_id: int | None = None
+    pending_question: str | None = None
+    effort: Effort = Effort.NORMAL
+    created_at: datetime
+    updated_at: datetime
 
 
 class TaskCreate(TaskBase):

@@ -104,6 +104,7 @@ def _task_to_read(task: Task) -> TaskRead:
         priority=task.priority,
         assignee_id=task.assignee_id,
         pending_question=task.pending_question,
+        effort=task.effort,
         created_at=task.created_at,
         updated_at=task.updated_at,
     )
