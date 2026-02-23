@@ -139,8 +139,10 @@ _pending_project: dict[int, _ProjectPending] = {}  # keyed by chat_id
 _last_project: dict[int, int] = {}  # chat_id → project_id
 
 
-def _resolve_project(project_id: int) -> tuple[int, str] | None:
+def _resolve_project(project_id: int | None) -> tuple[int, str] | None:
     """Return (id, name) if project exists, else None."""
+    if project_id is None:
+        return None
     project = task_service.get_project(project_id)
     if project is None:
         return None
@@ -890,6 +892,11 @@ async def _check_orphaned_tasks(context) -> None:
         logger.warning("Watchdog error while checking stale tasks: %s", e)
 
 
+async def _error_handler(update: object, context) -> None:
+    """Log uncaught exceptions from handlers so they don't fail silently."""
+    logger.exception("Unhandled exception in handler: %s", context.error)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -919,6 +926,7 @@ def main() -> None:
     )
     app.add_handler(CommandHandler("loglevel", cmd_loglevel))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+    app.add_error_handler(_error_handler)
 
     if app.job_queue is not None:
         app.job_queue.run_repeating(_send_reminders, interval=300, first=30)
