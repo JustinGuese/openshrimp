@@ -2,6 +2,12 @@ from sqlmodel import SQLModel, Field
 from enum import Enum
 from datetime import datetime
 
+class Effort(str, Enum):
+    QUICK = "quick"
+    NORMAL = "normal"
+    DEEP = "deep"
+
+
 class User(SQLModel, table=True):
     id: int = Field(default=None, primary_key=True)
     name: str
@@ -42,6 +48,9 @@ class TaskBase(SQLModel):
     status: TaskStatus = Field(default=TaskStatus.PENDING)
     priority: Priority = Field(default=Priority.MEDIUM)
     pending_question: str | None = Field(default=None)
+    effort: Effort = Field(default=Effort.NORMAL)
+    worker_id: str | None = Field(default=None)
+    heartbeat_at: datetime | None = Field(default=None)
 
 
 class Task(TaskBase, table=True):

@@ -13,7 +13,7 @@ from datetime import datetime
 from sqlmodel import Session, select
 
 import db as _db
-from models import DashboardToken, Priority, Project, Task, TaskStatus
+from models import DashboardToken, Effort, Priority, Project, Task, TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,7 @@ def create_task(
     assignee_id: int | None = None,
     priority: str = "medium",
     status: str = "pending",
+    effort: str = "normal",
 ) -> int:
     """Insert a new Task row and return its id."""
     _ensure_db()
@@ -83,6 +84,10 @@ def create_task(
         st = TaskStatus(status.lower())
     except ValueError:
         st = TaskStatus.PENDING
+    try:
+        eff = Effort(effort.lower())
+    except ValueError:
+        eff = Effort.NORMAL
 
     with Session(_db.get_engine()) as session:
         task = Task(
@@ -93,6 +98,7 @@ def create_task(
             assignee_id=assignee_id,
             priority=prio,
             status=st,
+            effort=eff,
         )
         session.add(task)
         session.commit()
@@ -168,11 +174,12 @@ def update_task(
     notes: str | None = None,
     assignee_id: object = _UNSET,
     pending_question: object = _UNSET,
+    worker_id: object = _UNSET,
 ) -> Task:
-    """Update a task's status, notes, assignee, or pending_question.
+    """Update a task's status, notes, assignee, pending_question, or worker_id.
 
-    Pass ``assignee_id=None`` or ``pending_question=None`` to explicitly clear
-    those fields. Omit them (leave as _UNSET) to leave them unchanged.
+    Pass ``assignee_id=None``, ``pending_question=None``, or ``worker_id=None``
+    to explicitly clear those fields. Omit them (leave as _UNSET) to leave unchanged.
     """
     _ensure_db()
     with Session(_db.get_engine()) as session:
@@ -190,6 +197,8 @@ def update_task(
             task.assignee_id = assignee_id  # type: ignore[assignment]
         if pending_question is not _UNSET:
             task.pending_question = pending_question  # type: ignore[assignment]
+        if worker_id is not _UNSET:
+            task.worker_id = worker_id  # type: ignore[assignment]
         task.updated_at = datetime.now()
         session.add(task)
         session.commit()
@@ -210,6 +219,82 @@ def reset_waiting_tasks() -> int:
             task.status = TaskStatus.FAILED
             task.assignee_id = None
             task.pending_question = None
+            session.add(task)
+        session.commit()
+        return len(tasks)
+
+
+def update_heartbeat(task_id: int) -> None:
+    """Update heartbeat_at for an IN_PROGRESS task to prove it is still alive."""
+    _ensure_db()
+    with Session(_db.get_engine()) as session:
+        task = session.get(Task, task_id)
+        if task is not None and task.status == TaskStatus.IN_PROGRESS:
+            task.heartbeat_at = datetime.now()
+            task.updated_at = datetime.now()
+            session.add(task)
+            session.commit()
+
+
+def reset_stale_in_progress(timeout_minutes: int = 10) -> int:
+    """Reset IN_PROGRESS tasks that have not sent a heartbeat within *timeout_minutes*.
+
+    Tasks are reset to PENDING so they can be retried. Returns the count reset.
+    """
+    from datetime import timedelta
+    from sqlalchemy import or_
+    _ensure_db()
+    cutoff = datetime.now() - timedelta(minutes=timeout_minutes)
+    with Session(_db.get_engine()) as session:
+        q = select(Task).where(
+            Task.status == TaskStatus.IN_PROGRESS,
+        ).where(
+            or_(
+                Task.heartbeat_at < cutoff,
+                (Task.heartbeat_at == None) & (Task.updated_at < cutoff),  # noqa: E711
+            )
+        )
+        tasks = list(session.exec(q))
+        for task in tasks:
+            logger.warning(
+                "Resetting stale IN_PROGRESS task #%s '%s' (last heartbeat=%s)",
+                task.id, task.title, task.heartbeat_at,
+            )
+            task.status = TaskStatus.PENDING
+            task.worker_id = None
+            task.heartbeat_at = None
+            task.updated_at = datetime.now()
+            session.add(task)
+        session.commit()
+        return len(tasks)
+
+
+def reset_foreign_workers(current_worker_id: str) -> int:
+    """Reset IN_PROGRESS tasks owned by a different worker (previous process).
+
+    Resets them to PENDING so the current process can pick them up.
+    Returns the count reset.
+    """
+    from sqlalchemy import or_
+    _ensure_db()
+    with Session(_db.get_engine()) as session:
+        q = select(Task).where(
+            Task.status == TaskStatus.IN_PROGRESS,
+            or_(
+                Task.worker_id != current_worker_id,
+                Task.worker_id == None,  # noqa: E711
+            ),
+        )
+        tasks = list(session.exec(q))
+        for task in tasks:
+            logger.warning(
+                "Resetting IN_PROGRESS task #%s '%s' from old worker '%s'.",
+                task.id, task.title, task.worker_id,
+            )
+            task.status = TaskStatus.PENDING
+            task.worker_id = None
+            task.heartbeat_at = None
+            task.updated_at = datetime.now()
             session.add(task)
         session.commit()
         return len(tasks)

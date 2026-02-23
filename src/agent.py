@@ -19,6 +19,13 @@ LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))  # seconds (converted to
 DEFAULT_MAX_TOOL_ROUNDS = int(os.environ.get("AGENT_DEFAULT_MAX_TOOL_ROUNDS", "10"))  # normal research
 DEEP_RESEARCH_MAX_TOOL_ROUNDS = int(os.environ.get("AGENT_DEEP_MAX_TOOL_ROUNDS", "25"))  # when user asks for deep/long
 
+# Effort → max tool rounds mapping
+EFFORT_ROUNDS: dict[str, int] = {
+    "quick": int(os.environ.get("AGENT_QUICK_MAX_TOOL_ROUNDS", "5")),
+    "normal": DEFAULT_MAX_TOOL_ROUNDS,
+    "deep": DEEP_RESEARCH_MAX_TOOL_ROUNDS,
+}
+
 TOOLS = load_plugins()
 TOOLS_BY_NAME = {t.name: t for t in TOOLS}
 
@@ -29,10 +36,10 @@ When you receive a task ID like [Your task ID is #N], you MUST follow these rule
 
 1. **Set in_progress immediately**: Your very first action must be update_task(task_id=N, status="in_progress").
 
-2. **Post frequent progress updates**: After every 1-2 tool calls, append a short note via update_task(task_id=N, notes="<what you just found>"). Keep each note to 1-3 sentences. Examples:
-   - "Visited example.com — found pricing: $10/mo basic, $50/mo pro."
-   - "Searched X API docs — REST only, no official SDK found."
-   - "Compared A vs B — A has better docs and community support."
+2. **Post frequent progress updates**: After every 1-2 tool calls, append a short note via update_task(task_id=N, notes="<what you just found>"). Keep each note to 1-3 sentences. Format notes so another agent could continue your work — include sources visited, key findings, approach taken, and what remains to be done. Examples:
+   - "Visited example.com — found pricing: $10/mo basic, $50/mo pro. Still need to check competitor pricing."
+   - "Searched X API docs — REST only, no official SDK found. Next: check GitHub issues for SDK requests."
+   - "Compared A vs B — A has better docs and community support. Remaining: check performance benchmarks."
 
 3. **Before marking completed — REQUIRED final summary**: You MUST call update_task(task_id=N, status="completed", notes="## Result\n<thorough summary with findings, conclusions, and recommendations>"). Never set status to "completed" without notes containing a real result.
 
@@ -45,6 +52,15 @@ When you receive a task ID like [Your task ID is #N], you MUST follow these rule
 
 Once you have enough information, respond with your final summary and recommendations without making further tool calls.
 When editing project files, use the filesystem tools (read_file, write_file, search_replace_file, etc.) with the task's project_id so files live in that project's workspace. Prefer search_replace_file for targeted edits; if it reports the old string was not found, use write_file to replace the whole file.
+
+## Rules for ask_human (STRICT):
+- ONLY ask when you genuinely cannot proceed without user input.
+- NEVER ask factual questions you could answer via web search or memory.
+- NEVER ask "should I continue?" or "do you want more detail?" — just do your best.
+- NEVER ask for confirmation of your approach — pick the best one and proceed.
+- Valid reasons to ask: ambiguous personal preferences, credentials, genuinely unclear requirements.
+- Before calling ask_human, check: "Could I make a reasonable assumption?" If yes, state it in a progress note and proceed.
+- Maximum 1 question per task unless the answer creates genuine new ambiguity.
 
 ## Usage and safety
 - **No malicious or harmful use:** Do not assist with malicious purposes, illegal activities, or anything intended to harm people, systems, or data.
@@ -85,22 +101,55 @@ def _create_llm():
     )
 
 
-def _system_prompt(max_tool_rounds: int) -> str:
-    """Build system prompt; nudge to limit page visits when not in deep research mode."""
+_EFFORT_GUIDANCE: dict[str, str] = {
+    "quick": (
+        "**Effort: QUICK** — Get to the answer fast. 1-2 web searches max. "
+        "Do NOT ask the user questions. Prefer existing knowledge over searching."
+    ),
+    "normal": (
+        "**Effort: NORMAL** — Balanced approach. Check 2-4 sources. "
+        "Avoid repeating searches with similar queries. Do not use the same tool more than 5 times."
+    ),
+    "deep": (
+        "**Effort: DEEP** — Research thoroughly. Cross-reference multiple sources. "
+        "Vary tool usage. Do not use any single tool more than 10 times."
+    ),
+}
+
+
+def _system_prompt(max_tool_rounds: int, effort: str = "normal") -> str:
+    """Build system prompt with effort-aware guidance and tool-round limit."""
     prompt = SYSTEM_PROMPT_BASE
-    if max_tool_rounds <= DEFAULT_MAX_TOOL_ROUNDS:
-        prompt += f"\nUse at most {max_tool_rounds} tool calls (page visits); then summarize your answer without further tool use."
+    guidance = _EFFORT_GUIDANCE.get(effort, _EFFORT_GUIDANCE["normal"])
+    prompt += f"\n\n{guidance}"
+    prompt += f"\nUse at most {max_tool_rounds} tool calls total; then summarize your answer without further tool use."
     return prompt
+
+
+def _count_tool_rounds(messages: list) -> int:
+    """Count completed tool rounds (messages with tool_calls)."""
+    return sum(1 for msg in messages if getattr(msg, "tool_calls", None))
 
 
 def _llm_call(state: MessagesState) -> dict:
     """LLM node: invoke model with tools and return the response message."""
     try:
         run_config = get_config()
-        max_rounds = (run_config.get("configurable") or {}).get("max_tool_rounds") or DEFAULT_MAX_TOOL_ROUNDS
+        configurable = run_config.get("configurable") or {}
+        max_rounds = configurable.get("max_tool_rounds") or DEFAULT_MAX_TOOL_ROUNDS
+        effort = configurable.get("effort") or "normal"
     except RuntimeError:
         max_rounds = DEFAULT_MAX_TOOL_ROUNDS
-    system_content = _system_prompt(max_rounds)
+        effort = "normal"
+    system_content = _system_prompt(max_rounds, effort)
+    used_rounds = _count_tool_rounds(state["messages"])
+    remaining = max(0, max_rounds - used_rounds)
+    budget_line = f"\n\nTool budget: {remaining}/{max_rounds} calls remaining."
+    if remaining <= 2 and used_rounds > 0:
+        budget_line += " You are running low. Wrap up and provide your final answer now."
+    elif remaining == 0:
+        budget_line += " You have NO calls left. Provide your final answer immediately."
+    system_content += budget_line
     messages = [SystemMessage(content=system_content)] + list(state["messages"])
     total_chars = sum(len(str(getattr(m, "content", ""))) for m in messages)
     logger.info(
@@ -174,6 +223,17 @@ def _tool_node(state: MessagesState) -> dict:
                 _cb(name, args, str(observation))
             except Exception:
                 pass
+
+    # Heartbeat: update the task's heartbeat_at after each round of tool calls
+    try:
+        import telegram_state
+        import task_service as _task_service
+        task_id = telegram_state.get_task_id()
+        if task_id:
+            _task_service.update_heartbeat(task_id)
+    except Exception:
+        pass
+
     return {"messages": result}
 
 
@@ -229,16 +289,24 @@ def _fallback_summary(query: str, messages: list) -> str:
     return f"⚠️ Hit tool-call limit; here's a summary of what was found:\n\n{result}"
 
 
-def run_research(query: str, on_progress=None) -> str:
-    """Run the research agent on a query and return the final assistant message content."""
+def run_research(query: str, on_progress=None, effort: str = "normal") -> str:
+    """Run the research agent on a query and return the final assistant message content.
+
+    Args:
+        query: The research query.
+        on_progress: Optional callback(tool_name, args, observation) called after each tool.
+        effort: One of "quick", "normal", "deep". Auto-upgrades to "deep" if deep keywords found.
+    """
     _thread_local.on_progress = on_progress
-    deep = _is_deep_research(query)
-    max_rounds = DEEP_RESEARCH_MAX_TOOL_ROUNDS if deep else DEFAULT_MAX_TOOL_ROUNDS
-    logger.info("Invoking research agent... (max_tool_rounds=%s, deep=%s)", max_rounds, deep)
+    # Auto-upgrade: if user asked for deep research but effort wasn't explicitly set to deep
+    if effort == "normal" and _is_deep_research(query):
+        effort = "deep"
+    max_rounds = EFFORT_ROUNDS.get(effort, DEFAULT_MAX_TOOL_ROUNDS)
+    logger.info("Invoking research agent... (max_tool_rounds=%s, effort=%s)", max_rounds, effort)
     agent = create_research_agent()
     config = {
         "recursion_limit": _recursion_limit(max_rounds),
-        "configurable": {"max_tool_rounds": max_rounds},
+        "configurable": {"max_tool_rounds": max_rounds, "effort": effort},
     }
 
     # Stream so we can capture accumulated state on recursion-limit error.

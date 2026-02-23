@@ -103,6 +103,17 @@ Setup is:
 
 No web UI to deploy. No frontend to configure. Telegram is the interface. Send a message, get a research result. Send `/status` to see what's running. Send `/dashboard` to get a link to your personal web dashboard.
 
+**Environment variables (Telegram bot):**
+
+| Variable | Description |
+|----------|-------------|
+| `TELEGRAM_BOT_TOKEN` | **Required.** From BotFather. |
+| `DEFAULT_USER_ID`, `DEFAULT_PROJECT_ID`, `DEFAULT_AGENT_USER_ID` | Optional. DB ids for the human, default project, and agent (default: auto-created). |
+| `DASHBOARD_BASE_URL` | Base URL for dashboard links the bot sends (default: `http://localhost:8000`). |
+| `AUTO_START_TASKS` | If true (default), start tasks immediately using last/default project; if false, show project picker each time. |
+| `AGENT_MAX_RETRIES` | Number of retries on transient failures (e.g. timeouts, 5xx). Default: 2. Retry backoff is capped below the watchdog so in-progress tasks are not reset during retries. |
+| `HEARTBEAT_WATCHDOG_MINUTES` | Minutes without a heartbeat before an IN_PROGRESS task is reset to pending. Default: 10. |
+
 
 #### 6. Stealth Web Research That Actually Works
 

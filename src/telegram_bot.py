@@ -14,13 +14,17 @@ Required env vars:
 """
 
 import asyncio
+import functools
 import html
 import logging
 import os
 import sys
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Awaitable, Callable
 from urllib.parse import urlparse
 
 # Ensure src/ is on sys.path when run directly
@@ -49,6 +53,9 @@ logger = logging.getLogger("telegram_bot")
 
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="agent-worker")
 
+# Unique identifier for this bot process — used to claim tasks and detect orphans from old processes
+WORKER_ID = f"tg-{uuid.uuid4().hex[:8]}"
+
 DEFAULT_USER_ID = int(os.environ.get("DEFAULT_USER_ID", "0"))
 DEFAULT_PROJECT_ID = int(os.environ.get("DEFAULT_PROJECT_ID", "0"))
 DEFAULT_AGENT_USER_ID = int(os.environ.get("DEFAULT_AGENT_USER_ID", "0"))
@@ -57,6 +64,30 @@ DEFAULT_AGENT_USER_ID = int(os.environ.get("DEFAULT_AGENT_USER_ID", "0"))
 _human_user_id: int = 0
 _agent_user_id: int = 0
 _effective_project_id: int = 0
+
+AUTO_START_TASKS = os.environ.get("AUTO_START_TASKS", "true").strip().lower() in ("true", "1", "yes")
+
+AGENT_MAX_RETRIES = int(os.environ.get("AGENT_MAX_RETRIES", "2"))
+RETRY_BACKOFF = [30, 60]  # seconds between retries
+# Keep max backoff below watchdog so IN_PROGRESS task is not reset during retry sleep
+WATCHDOG_TIMEOUT_MINUTES = max(1, int(os.environ.get("HEARTBEAT_WATCHDOG_MINUTES", "10")))
+MAX_RETRY_BACKOFF_SECONDS = 300  # 5 min; must be < WATCHDOG_TIMEOUT_MINUTES * 60
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """Conservative check for retriable errors."""
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return True
+    name = type(exc).__name__
+    if name in ("ReadTimeout", "ConnectTimeout", "RemoteProtocolError", "ConnectError"):
+        return True
+    s = str(exc)
+    if any(code in s for code in ("429", "500", "502", "503", "504")):
+        return True
+    if any(kw in s.lower() for kw in ("timeout", "rate limit", "connection reset")):
+        return True
+    return False
+
 
 # Per-chat log level: "INFO" = only answers/follow-ups; "DEBUG" = include tool progress
 _chat_log_level: dict[int, str] = {}
@@ -73,9 +104,25 @@ TELEGRAM_CHUNK_SIZE = 4090
 STATUS_REFRESH_DATA = "status:refresh"
 
 PROJECT_SELECT_PREFIX = "proj:"
+PROJECT_CONFIRM_PREFIX = "projconfirm:"
+PROJECT_SET_PREFIX = "setproj:"
 
 # Logo path for /start greeting (project root logo.jpg)
 _LOGO_PATH = Path(__file__).resolve().parent.parent / "logo.jpg"
+
+# Keywords for effort detection
+_QUICK_KEYWORDS = ("quick", "briefly", "brief", "fast", "tl;dr", "tldr", "short", "summary only")
+_DEEP_KEYWORDS = ("deep", "comprehensive", "thorough", "exhaustive", "deep dive", "extensive", "in detail", "detailed")
+
+
+def _detect_effort(text: str) -> str:
+    """Detect effort level from message text. Returns 'quick', 'normal', or 'deep'."""
+    t = text.lower()
+    if any(kw in t for kw in _DEEP_KEYWORDS):
+        return "deep"
+    if any(kw in t for kw in _QUICK_KEYWORDS):
+        return "quick"
+    return "normal"
 
 
 @dataclass
@@ -83,9 +130,21 @@ class _ProjectPending:
     user_text: str
     auto_name: str  # proposed new project name
     message_id: int  # bot message with the keyboard; used to reject stale taps
+    effort: str = "normal"
 
 
 _pending_project: dict[int, _ProjectPending] = {}  # keyed by chat_id
+
+# Remember last-used project per chat_id for the quick Yes/No confirmation flow
+_last_project: dict[int, int] = {}  # chat_id → project_id
+
+
+def _resolve_project(project_id: int) -> tuple[int, str] | None:
+    """Return (id, name) if project exists, else None."""
+    project = task_service.get_project(project_id)
+    if project is None:
+        return None
+    return (project.id, project.name)
 
 
 def _chunk_text(text: str, max_len: int = TELEGRAM_CHUNK_SIZE) -> list[str]:
@@ -215,10 +274,13 @@ def _ensure_default_user_and_project() -> None:
 
 
 def _reset_orphaned_tasks() -> None:
-    """Set all waiting_for_human tasks to failed (process restarted; events are gone)."""
+    """On startup: reset waiting_for_human tasks to failed and reset IN_PROGRESS tasks from previous processes."""
     count = task_service.reset_waiting_tasks()
     if count:
         logger.warning("Reset %s orphaned waiting_for_human task(s) to failed.", count)
+    foreign = task_service.reset_foreign_workers(current_worker_id=WORKER_ID)
+    if foreign:
+        logger.warning("Reset %s IN_PROGRESS task(s) from previous processes to pending.", foreign)
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +334,7 @@ def _run_agent_in_thread(
     task_title: str,
     app: Application,
     loop: asyncio.AbstractEventLoop,
+    effort: str = "normal",
 ) -> None:
     """Execute the research agent and send the final answer back to the user."""
     telegram_state.set_context(
@@ -283,7 +346,12 @@ def _run_agent_in_thread(
         agent_user_id=_agent_user_id,
     )
     try:
-        task_service.update_task(task_id, status=TaskStatus.IN_PROGRESS.value, assignee_id=_agent_user_id)
+        task_service.update_task(
+            task_id,
+            status=TaskStatus.IN_PROGRESS.value,
+            assignee_id=_agent_user_id,
+            worker_id=WORKER_ID,
+        )
     except Exception as e:
         logger.warning("Failed to mark task %s in_progress: %s", task_id, e)
 
@@ -292,17 +360,41 @@ def _run_agent_in_thread(
 
     failed = False
     body = ""
-    try:
-        body = run_research(query, on_progress=on_progress) or "(No answer produced)"
-        task_service.update_task(task_id, status=TaskStatus.COMPLETED.value)
-    except Exception as e:
-        logger.exception("Agent failed for task %s: %s", task_id, e)
-        body = f"❌ Research failed: {e!r}"
-        failed = True
+    max_attempts = 1 + AGENT_MAX_RETRIES
+    for attempt in range(max_attempts):
         try:
-            task_service.update_task(task_id, status=TaskStatus.FAILED.value)
-        except Exception:
-            pass
+            body = run_research(query, on_progress=on_progress, effort=effort) or "(No answer produced)"
+            task_service.update_task(task_id, status=TaskStatus.COMPLETED.value)
+            break
+        except Exception as e:
+            logger.exception("Agent failed for task %s: %s", task_id, e)
+            body = f"❌ Research failed: {e!r}"
+            retries_left = max_attempts - 1 - attempt
+            if _is_transient_error(e) and retries_left > 0:
+                raw_backoff = RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)]
+                backoff = min(raw_backoff, MAX_RETRY_BACKOFF_SECONDS)
+                logger.warning(
+                    "Retrying task %s in %ss (attempt %s/%s)",
+                    task_id, backoff, attempt + 1, max_attempts,
+                )
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        app.bot.send_message(
+                            chat_id=chat_id,
+                            text=BOT_PREFIX + f"⏳ Retrying in {backoff}s…",
+                        ),
+                        loop,
+                    ).result(timeout=30)
+                except Exception:
+                    pass
+                time.sleep(backoff)
+            else:
+                failed = True
+                try:
+                    task_service.update_task(task_id, status=TaskStatus.FAILED.value)
+                except Exception:
+                    pass
+                break
 
     if failed:
         answer = BOT_PREFIX + f"❌ Task #{task_id} failed:\n\n{body}\n\n---\nTask: {task_title}"
@@ -334,6 +426,7 @@ async def cmd_start(update: Update, context) -> None:
         "Commands:\n"
         "/status — see active tasks + dashboard link\n"
         "/dashboard — get your personal task dashboard\n"
+        "/project — switch default project for new tasks\n"
         "/loglevel — toggle verbosity (INFO/DEBUG)\n\n"
         "Just type your question to get started.\n\n"
         "For paid premium hosted plans (larger models, higher limits), "
@@ -480,8 +573,139 @@ async def cmd_loglevel(update: Update, context) -> None:
     )
 
 
+async def cmd_project(update: Update, context) -> None:
+    """Show project list so user can set the default project for new tasks."""
+    projects = task_service.list_projects(user_id=_human_user_id)
+    if not projects:
+        await update.message.reply_text(BOT_PREFIX + "No projects yet. Send a task to create one.")
+        return
+    rows = [
+        [InlineKeyboardButton(f"📁 {p.name}", callback_data=f"{PROJECT_SET_PREFIX}{p.id}")]
+        for p in projects[:10]
+    ]
+    await update.message.reply_text(
+        BOT_PREFIX + "Select project for new tasks:",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def on_set_project(update: Update, context) -> None:
+    """Handle project selection from /project keyboard."""
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id
+    # callback_data is "setproj:<id>"
+    data = query.data or ""
+    if not data.startswith(PROJECT_SET_PREFIX):
+        return
+    try:
+        project_id = int(data[len(PROJECT_SET_PREFIX) :])
+    except ValueError:
+        await query.edit_message_text(BOT_PREFIX + "⚠️ Invalid project.")
+        return
+    project = task_service.get_project(project_id)
+    if project is None:
+        await query.edit_message_text(BOT_PREFIX + "⚠️ Project no longer exists.")
+        return
+    _last_project[chat_id] = project_id
+    await query.edit_message_text(
+        BOT_PREFIX + f"✅ Project set to *{project.name}*. New tasks will use this project.",
+        parse_mode="Markdown",
+    )
+
+
+EFFORT_LABEL = {"quick": " ⚡ quick", "deep": " 🔬 deep", "normal": ""}
+
+
+async def _create_task_and_launch_agent(
+    chat_id: int,
+    project_id: int,
+    project_name: str,
+    user_text: str,
+    effort: str,
+    app: Application,
+    loop: asyncio.AbstractEventLoop,
+    send_start_message: Callable[[str], Awaitable[None]],
+    send_error_message: Callable[[str], Awaitable[None]],
+) -> None:
+    """Create a DB task and launch the agent. Caller provides how to send start/error messages."""
+    _last_project[chat_id] = project_id
+
+    task_title = user_text[:120]
+    try:
+        task_id = task_service.create_task(
+            title=task_title,
+            description=user_text,
+            user_id=_human_user_id,
+            project_id=project_id,
+            assignee_id=_agent_user_id,
+            effort=effort,
+        )
+    except Exception as e:
+        logger.exception("Failed to create task in DB: %s", e)
+        await send_error_message(BOT_PREFIX + f"⚠️ Could not create task (DB error): {e}")
+        return
+
+    active_ctx = task_service.list_active_summary(user_id=_human_user_id)
+    research_query = _build_query(user_text, task_id, active_ctx)
+
+    effort_label = EFFORT_LABEL.get(effort, "")
+    start_text = BOT_PREFIX + f"⏳ Starting task #{task_id}{effort_label} in project *{project_name}*…"
+    await send_start_message(start_text)
+
+    loop.run_in_executor(
+        _executor,
+        functools.partial(
+            _run_agent_in_thread,
+            query=research_query,
+            chat_id=chat_id,
+            task_id=task_id,
+            task_title=task_title,
+            app=app,
+            loop=loop,
+            effort=effort,
+        ),
+    )
+
+
+async def _create_and_start_task(
+    edit_target,  # object with .edit_message_text() — query or message
+    chat_id: int,
+    project_id: int,
+    project_name: str,
+    user_text: str,
+    effort: str,
+    app: Application,
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """Create a DB task and launch the agent worker. Shared by project selection handlers."""
+    await _create_task_and_launch_agent(
+        chat_id, project_id, project_name, user_text, effort, app, loop,
+        send_start_message=lambda t: edit_target.edit_message_text(t, parse_mode="Markdown"),
+        send_error_message=lambda t: edit_target.edit_message_text(t),
+    )
+
+
+async def _auto_start_task(
+    update: Update,
+    chat_id: int,
+    project_id: int,
+    project_name: str,
+    user_text: str,
+    effort: str,
+    app: Application,
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """Create a DB task and launch the agent; no existing bot message to edit (use reply_text)."""
+    await _create_task_and_launch_agent(
+        chat_id, project_id, project_name, user_text, effort, app, loop,
+        send_start_message=lambda t: update.message.reply_text(t, parse_mode="Markdown"),
+        send_error_message=lambda t: update.message.reply_text(t),
+    )
+
+
 async def on_project_selected(update: Update, context) -> None:
-    """Handle project selection button tap."""
+    """Handle project selection button tap (full project picker)."""
     query = update.callback_query
     await query.answer()
     chat_id = update.effective_chat.id
@@ -495,6 +719,7 @@ async def on_project_selected(update: Update, context) -> None:
     loop = asyncio.get_running_loop()
     app = context.application
     user_text = pending.user_text
+    effort = pending.effort
     data = query.data  # "proj:id:N" or "proj:new"
 
     if data.startswith("proj:id:"):
@@ -510,39 +735,62 @@ async def on_project_selected(update: Update, context) -> None:
         project_id = project.id
         project_name = project.name
 
-    task_title = user_text[:120]
-    try:
-        task_id = task_service.create_task(
-            title=task_title,
-            description=user_text,
-            user_id=_human_user_id,
-            project_id=project_id,
-            assignee_id=_agent_user_id,
-        )
-    except Exception as e:
-        logger.exception("Failed to create task in DB: %s", e)
-        await query.edit_message_text(
-            BOT_PREFIX + f"⚠️ Could not create task (DB error): {e}"
-        )
+    await _create_and_start_task(query, chat_id, project_id, project_name, user_text, effort, app, loop)
+
+
+async def on_project_confirm(update: Update, context) -> None:
+    """Handle Yes/No confirmation for last-used project.
+
+    Callback data format:
+      projconfirm:yes:<project_id>  — use the last project directly
+      projconfirm:no                — show the full project picker
+    """
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id
+
+    pending = _pending_project.get(chat_id)
+    if pending is None or pending.message_id != query.message.message_id:
+        await query.edit_message_text(BOT_PREFIX + "⚠️ This selection has expired.")
         return
 
-    active_ctx = task_service.list_active_summary(user_id=_human_user_id)
-    research_query = _build_query(user_text, task_id, active_ctx)
+    data = query.data  # "projconfirm:yes:<id>" or "projconfirm:no"
+    loop = asyncio.get_running_loop()
+    app = context.application
 
-    await query.edit_message_text(
-        BOT_PREFIX + f"⏳ Starting task #{task_id} in project *{project_name}*…",
-        parse_mode="Markdown",
+    if data.startswith("projconfirm:yes:"):
+        project_id = int(data.split(":")[-1])
+        project = task_service.get_project(project_id)
+        if project is None:
+            # Project no longer exists — fall through to full picker
+            pass
+        else:
+            del _pending_project[chat_id]
+            await _create_and_start_task(
+                query, chat_id, project_id, project.name,
+                pending.user_text, pending.effort, app, loop,
+            )
+            return
+
+    # "projconfirm:no" or project gone — show the full project picker
+    del _pending_project[chat_id]
+    user_text = pending.user_text
+    effort = pending.effort
+    auto_name = pending.auto_name
+    projects = task_service.list_projects(user_id=_human_user_id)
+    keyboard = _build_project_keyboard(projects, auto_name, _effective_project_id)
+    result = await query.edit_message_text(
+        BOT_PREFIX + "📋 Which project should I file this under?",
+        reply_markup=keyboard,
     )
-
-    loop.run_in_executor(
-        _executor,
-        _run_agent_in_thread,
-        research_query,
-        chat_id,
-        task_id,
-        task_title,
-        app,
-        loop,
+    # edit_message_text returns Message on success, True if message unchanged
+    if not hasattr(result, "message_id"):
+        logger.warning("edit_message_text returned non-Message; using original message_id")
+        message_id = query.message.message_id
+    else:
+        message_id = result.message_id
+    _pending_project[chat_id] = _ProjectPending(
+        user_text=user_text, auto_name=auto_name, message_id=message_id, effort=effort
     )
 
 
@@ -550,7 +798,7 @@ async def on_message(update: Update, context) -> None:
     """Handle a free-form text message.
 
     If there is a pending ask_human question for this chat, route the reply to
-    the waiting agent thread. Otherwise, create a new task and run the agent.
+    the waiting agent thread. Otherwise, propose a project and start the task.
     """
     user_text = (update.message.text or "").strip()
     if not user_text:
@@ -563,16 +811,52 @@ async def on_message(update: Update, context) -> None:
         _human_input.resolve(chat_id, user_text)
         return
 
-    # Show project selection keyboard; task creation happens in on_project_selected
+    if AUTO_START_TASKS:
+        resolved = _resolve_project(_last_project.get(chat_id)) or _resolve_project(_effective_project_id)
+        if resolved:
+            effort = _detect_effort(user_text)
+            loop = asyncio.get_running_loop()
+            app = context.application
+            await _auto_start_task(update, chat_id, *resolved, user_text, effort, app, loop)
+            return
+
+    effort = _detect_effort(user_text)
     auto_name = _propose_project_name(user_text)
-    projects = task_service.list_projects()
+
+    # If there is a previously used project for this chat, offer a quick Yes/No confirmation
+    last_pid = _last_project.get(chat_id)
+    if last_pid:
+        last_project = task_service.get_project(last_pid)
+        if last_project is not None:
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        f"✅ Yes, use '{last_project.name}'",
+                        callback_data=f"projconfirm:yes:{last_pid}",
+                    ),
+                    InlineKeyboardButton("🔀 Pick another", callback_data="projconfirm:no"),
+                ]
+            ])
+            msg = await update.message.reply_text(
+                BOT_PREFIX + f"📋 Use project *{last_project.name}* again?",
+                reply_markup=keyboard,
+                parse_mode="Markdown",
+            )
+            _pending_project[chat_id] = _ProjectPending(
+                user_text=user_text, auto_name=auto_name,
+                message_id=msg.message_id, effort=effort,
+            )
+            return
+
+    # No remembered project — show full project selection keyboard
+    projects = task_service.list_projects(user_id=_human_user_id)
     keyboard = _build_project_keyboard(projects, auto_name, _effective_project_id)
     msg = await update.message.reply_text(
         BOT_PREFIX + "📋 Which project should I file this under?",
         reply_markup=keyboard,
     )
     _pending_project[chat_id] = _ProjectPending(
-        user_text=user_text, auto_name=auto_name, message_id=msg.message_id
+        user_text=user_text, auto_name=auto_name, message_id=msg.message_id, effort=effort
     )
 
 
@@ -596,6 +880,16 @@ async def _send_reminders(context) -> None:
             logger.warning("Failed to send reminder to chat %s: %s", pq.chat_id, e)
 
 
+async def _check_orphaned_tasks(context) -> None:
+    """Watchdog: reset IN_PROGRESS tasks that have stopped sending heartbeats."""
+    try:
+        reset_count = task_service.reset_stale_in_progress(timeout_minutes=WATCHDOG_TIMEOUT_MINUTES)
+        if reset_count:
+            logger.warning("Watchdog reset %s stale IN_PROGRESS task(s) to pending.", reset_count)
+    except Exception as e:
+        logger.warning("Watchdog error while checking stale tasks: %s", e)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -615,6 +909,10 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("dashboard", cmd_dashboard))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("project", cmd_project))
+    # projconfirm: must be registered BEFORE proj: to avoid prefix collision
+    app.add_handler(CallbackQueryHandler(on_project_confirm, pattern=r"^projconfirm:"))
+    app.add_handler(CallbackQueryHandler(on_set_project, pattern=f"^{PROJECT_SET_PREFIX}"))
     app.add_handler(CallbackQueryHandler(on_project_selected, pattern=r"^proj:"))
     app.add_handler(
         CallbackQueryHandler(on_status_refresh, pattern=f"^{STATUS_REFRESH_DATA}$")
@@ -624,9 +922,10 @@ def main() -> None:
 
     if app.job_queue is not None:
         app.job_queue.run_repeating(_send_reminders, interval=300, first=30)
+        app.job_queue.run_repeating(_check_orphaned_tasks, interval=300, first=60)
     else:
         logger.warning(
-            "Job queue not available (install python-telegram-bot[job-queue]). Reminders disabled."
+            "Job queue not available (install python-telegram-bot[job-queue]). Reminders and watchdog disabled."
         )
 
     logger.info("Starting Telegram bot (polling)…")
