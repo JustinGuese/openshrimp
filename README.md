@@ -142,6 +142,79 @@ The result: long-running research sessions that don't get interrupted by "please
 It is not a demo agent. It is designed to behave like a structured autonomous worker.
 
 
+### How It Works
+
+```
+User (Telegram)
+  │
+  ▼
+Telegram Bot  ──────────────────────────────────────────┐
+  │  • detects effort level (quick / normal / deep)     │
+  │  • creates a DB task (PostgreSQL)                   │
+  │  • picks the right LLM model for the effort level   │
+  ▼                                                     │
+Thread Pool (up to 4 workers)                           │
+  │                                                     │
+  ▼                                                     │
+LangGraph Agent                                         │
+  │  loop:                                              │
+  │    1. LLM decides which tool(s) to call             │
+  │    2. Tool node executes them (browser, memory, …)  │
+  │    3. Heartbeat → DB (proves the task is alive)     │
+  │    4. Repeat until done or budget exhausted         │
+  │                                                     │
+  │  can call ask_human → blocks thread, waits for      │
+  │  Telegram reply, then resumes                       │
+  │                                                     │
+  ▼                                                     │
+Task marked completed / failed in DB  ◄─────────────────┘
+  │
+  ▼
+Answer sent back to Telegram
+```
+
+#### Effort-based model routing
+
+openShrimp detects how much effort a task needs from keywords in the message and routes it to the right model:
+
+| Effort | Trigger keywords | Default model | Tool-call budget |
+|--------|-----------------|---------------|-----------------|
+| **Quick** | "quick", "briefly", "tl;dr", "summary only" | `openai/gpt-oss-120b` (fast/cheap) | 5 calls |
+| **Normal** | _(everything else)_ | `deepseek/deepseek-v3.2` | 10 calls |
+| **Deep** | "deep dive", "thorough", "comprehensive", "exhaustive" | `z-ai/glm-5` (thinking model) | 25 calls |
+
+Override any model with environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `OPENROUTER_MODEL` | Global fallback model (default: `deepseek/deepseek-v3.2`). |
+| `OPENROUTER_MODEL_QUICK` | Model for quick/low-effort tasks. |
+| `OPENROUTER_MODEL_NORMAL` | Model for normal tasks. |
+| `OPENROUTER_MODEL_DEEP` | Model for deep research tasks. |
+
+The agent sees its remaining tool budget at every step ("Tool budget: 3/10 calls remaining") and wraps up gracefully instead of hitting a hard cutoff.
+
+#### Reliability
+
+* **Automatic retries** — transient failures (timeouts, rate limits, 5xx errors) are retried up to `AGENT_MAX_RETRIES` times (default: 2) with backoff. Non-transient errors fail immediately.
+* **Heartbeat watchdog** — every tool call sends a heartbeat to the DB. If an agent thread dies silently, the watchdog resets the task to `pending` after `HEARTBEAT_WATCHDOG_MINUTES` (default: 10) so it can be retried.
+* **Process-crash recovery** — on startup, any `IN_PROGRESS` tasks from a previous bot process are reset to `pending`.
+* **ask_human gating** — an LLM evaluator rejects trivial questions before they reach the user, plus a hard cap of `MAX_ASKS_PER_TASK` (default: 2) per task.
+
+#### Plugins
+
+Each plugin lives in `src/plugins/<name>/` with a `manifest.json` and a `tool.py` exporting a `TOOLS` list. The agent loads all plugins at startup.
+
+| Plugin | What it does |
+|--------|-------------|
+| `browser_research` | Stealth Chromium browsing with CAPTCHA solving |
+| `memory_rag` | Long-term memory via PGVector (add/retrieve) |
+| `task_tracking` | Create, update, and list tasks from within the agent |
+| `telegram_notify` | Send mid-research messages to the user |
+| `human_input` | Ask the user a question and block until they reply |
+| `filesystem` | Read/write/search files in the project workspace |
+
+
 ### Dashboard Access
 
 The web dashboard (task board and table) is **locked by default**. Access requires a secret token in the URL.
