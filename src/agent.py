@@ -26,6 +26,13 @@ EFFORT_ROUNDS: dict[str, int] = {
     "deep": DEEP_RESEARCH_MAX_TOOL_ROUNDS,
 }
 
+# Model per effort level — empty means use OPENROUTER_MODEL
+EFFORT_MODELS: dict[str, str] = {
+    "quick": os.environ.get("OPENROUTER_MODEL_QUICK", "openai/gpt-oss-120b"),
+    "normal": os.environ.get("OPENROUTER_MODEL_NORMAL", "deepseek/deepseek-v3.2"),
+    "deep": os.environ.get("OPENROUTER_MODEL_DEEP", "z-ai/glm-5"),
+}
+
 TOOLS = load_plugins()
 TOOLS_BY_NAME = {t.name: t for t in TOOLS}
 
@@ -87,14 +94,18 @@ def _is_deep_research(query: str) -> bool:
     return any(kw in q for kw in DEEP_RESEARCH_KEYWORDS)
 
 
-def _create_llm():
+def _create_llm(effort: str = "normal"):
     api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise ValueError(
             "OPENROUTER_API_KEY (or OPENAI_API_KEY) must be set. Add it to .env or export it."
         )
+    # Per-effort model, falling back to the global default
+    default_model = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v3.2")
+    model = EFFORT_MODELS.get(effort, "").strip() or default_model
+    logger.info("Using model %s for effort=%s", model, effort)
     return ChatOpenRouter(
-        model=os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v3.2"),
+        model=model,
         temperature=0,
         api_key=api_key,
         timeout=LLM_TIMEOUT * 1000,  # SDK expects milliseconds
@@ -158,7 +169,7 @@ def _llm_call(state: MessagesState) -> dict:
         total_chars,
         LLM_TIMEOUT,
     )
-    llm = _create_llm()
+    llm = _create_llm(effort=effort)
     llm_with_tools = llm.bind_tools(TOOLS) if TOOLS else llm
     t0 = time.monotonic()
     response = llm_with_tools.invoke(messages)
@@ -282,7 +293,7 @@ def _fallback_summary(query: str, messages: list) -> str:
         f"If you don't have enough to answer fully, say so and share what you found."
     )
     logger.info("Calling LLM for fallback summary (%d tool results).", len(tool_contents))
-    llm = _create_llm()
+    llm = _create_llm(effort="normal")
     response = llm.invoke([HumanMessage(content=summary_prompt)])
     result = getattr(response, "content", str(response)) or ""
     logger.info("Fallback summary length=%d", len(result))
