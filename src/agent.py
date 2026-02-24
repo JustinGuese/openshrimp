@@ -147,12 +147,13 @@ def _create_llm(effort: str = "normal", model: str | None = None):
         default_model = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v3.2")
         model = EFFORT_MODELS.get(effort, "").strip() or default_model
     logger.info("Using model %s for effort=%s", model, effort)
-    return ChatOpenRouter(
+    llm = ChatOpenRouter(
         model=model,
         temperature=0,
         api_key=api_key,
         timeout=LLM_TIMEOUT * 1000,  # SDK expects milliseconds
     )
+    return llm, model
 
 
 _EFFORT_GUIDANCE: dict[str, str] = {
@@ -212,8 +213,7 @@ def _llm_call(state: MessagesState) -> dict:
         total_chars,
         LLM_TIMEOUT,
     )
-    llm = _create_llm(effort=effort)
-    primary_model = llm.model
+    llm, primary_model = _create_llm(effort=effort)
     llm_with_tools = llm.bind_tools(TOOLS) if TOOLS else llm
     t0 = time.monotonic()
     try:
@@ -225,7 +225,7 @@ def _llm_call(state: MessagesState) -> dict:
                 "Primary model %s failed: %s. Falling back to %s.",
                 primary_model, llm_exc, fallback_model,
             )
-            fallback_llm = _create_llm(effort=effort, model=fallback_model)
+            fallback_llm, _ = _create_llm(effort=effort, model=fallback_model)
             llm_with_tools_fb = fallback_llm.bind_tools(TOOLS) if TOOLS else fallback_llm
             response = llm_with_tools_fb.invoke(messages)
         else:
@@ -382,7 +382,7 @@ def _fallback_summary(query: str, messages: list) -> str:
         f"If you don't have enough to answer fully, say so and share what you found."
     )
     logger.info("Calling LLM for fallback summary (%d tool results).", len(tool_contents))
-    llm = _create_llm(effort="normal")
+    llm, _ = _create_llm(effort="normal")
     response = llm.invoke([HumanMessage(content=summary_prompt)])
     result = getattr(response, "content", str(response)) or ""
     logger.info("Fallback summary length=%d", len(result))
