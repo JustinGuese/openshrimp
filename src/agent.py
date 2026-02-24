@@ -1,5 +1,7 @@
 """LangGraph agent with OpenRouter LLM and plugin-based tools."""
 
+import hashlib
+import json
 import logging
 import os
 import threading
@@ -19,6 +21,10 @@ LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))  # seconds (converted to
 DEFAULT_MAX_TOOL_ROUNDS = int(os.environ.get("AGENT_DEFAULT_MAX_TOOL_ROUNDS", "10"))  # normal research
 DEEP_RESEARCH_MAX_TOOL_ROUNDS = int(os.environ.get("AGENT_DEEP_MAX_TOOL_ROUNDS", "25"))  # when user asks for deep/long
 
+TOOL_LOOP_WARN_THRESHOLD  = int(os.environ.get("TOOL_LOOP_WARN_THRESHOLD", "3"))
+TOOL_LOOP_BLOCK_THRESHOLD = int(os.environ.get("TOOL_LOOP_BLOCK_THRESHOLD", "5"))
+TOOL_RESULT_MAX_CHARS = int(os.environ.get("TOOL_RESULT_MAX_CHARS", "15000"))
+
 # Effort → max tool rounds mapping
 EFFORT_ROUNDS: dict[str, int] = {
     "quick": int(os.environ.get("AGENT_QUICK_MAX_TOOL_ROUNDS", "5")),
@@ -31,6 +37,12 @@ EFFORT_MODELS: dict[str, str] = {
     "quick": os.environ.get("OPENROUTER_MODEL_QUICK", "openai/gpt-oss-120b"),
     "normal": os.environ.get("OPENROUTER_MODEL_NORMAL", "deepseek/deepseek-v3.2"),
     "deep": os.environ.get("OPENROUTER_MODEL_DEEP", "z-ai/glm-5"),
+}
+
+EFFORT_MODELS_FALLBACK: dict[str, str] = {
+    "quick":  os.environ.get("OPENROUTER_MODEL_QUICK_FALLBACK",  "deepseek/deepseek-v3.2"),
+    "normal": os.environ.get("OPENROUTER_MODEL_NORMAL_FALLBACK", "deepseek/deepseek-v3.2"),
+    "deep":   os.environ.get("OPENROUTER_MODEL_DEEP_FALLBACK",   "deepseek/deepseek-v3.2"),
 }
 
 TOOLS = load_plugins()
@@ -94,15 +106,46 @@ def _is_deep_research(query: str) -> bool:
     return any(kw in q for kw in DEEP_RESEARCH_KEYWORDS)
 
 
-def _create_llm(effort: str = "normal"):
+def _tool_call_hash(name: str, args: dict) -> str:
+    """Deterministic hash for a tool call (name + sorted args)."""
+    payload = f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _truncate_observation(text: str, max_chars: int = TOOL_RESULT_MAX_CHARS) -> str:
+    """Truncate tool output to avoid blowing up the context window."""
+    if len(text) <= max_chars:
+        return text
+    overflow = len(text) - max_chars
+    return text[:max_chars] + f"\n\n[... truncated {overflow:,} chars]"
+
+
+def _is_transient_llm_error(exc: Exception) -> bool:
+    """Return True if the exception looks like a transient/retriable LLM error."""
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return True
+    name = type(exc).__name__
+    if name in ("ReadTimeout", "ConnectTimeout", "RemoteProtocolError", "ConnectError"):
+        return True
+    s = str(exc)
+    if any(code in s for code in ("429", "500", "502", "503", "504")):
+        return True
+    if any(kw in s.lower() for kw in ("timeout", "rate limit", "connection reset",
+                                       "model not available", "no endpoints", "overloaded")):
+        return True
+    return False
+
+
+def _create_llm(effort: str = "normal", model: str | None = None):
     api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise ValueError(
             "OPENROUTER_API_KEY (or OPENAI_API_KEY) must be set. Add it to .env or export it."
         )
     # Per-effort model, falling back to the global default
-    default_model = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v3.2")
-    model = EFFORT_MODELS.get(effort, "").strip() or default_model
+    if model is None:
+        default_model = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v3.2")
+        model = EFFORT_MODELS.get(effort, "").strip() or default_model
     logger.info("Using model %s for effort=%s", model, effort)
     return ChatOpenRouter(
         model=model,
@@ -170,9 +213,23 @@ def _llm_call(state: MessagesState) -> dict:
         LLM_TIMEOUT,
     )
     llm = _create_llm(effort=effort)
+    primary_model = llm.model
     llm_with_tools = llm.bind_tools(TOOLS) if TOOLS else llm
     t0 = time.monotonic()
-    response = llm_with_tools.invoke(messages)
+    try:
+        response = llm_with_tools.invoke(messages)
+    except Exception as llm_exc:
+        fallback_model = EFFORT_MODELS_FALLBACK.get(effort)
+        if fallback_model and fallback_model != primary_model and _is_transient_llm_error(llm_exc):
+            logger.warning(
+                "Primary model %s failed: %s. Falling back to %s.",
+                primary_model, llm_exc, fallback_model,
+            )
+            fallback_llm = _create_llm(effort=effort, model=fallback_model)
+            llm_with_tools_fb = fallback_llm.bind_tools(TOOLS) if TOOLS else fallback_llm
+            response = llm_with_tools_fb.invoke(messages)
+        else:
+            raise
     elapsed = time.monotonic() - t0
     logger.info(
         "LLM returned in %.1fs (tool_calls=%s)",
@@ -195,26 +252,56 @@ def _tool_node(state: MessagesState) -> dict:
         args = args or {}
         call_id = getattr(tool_call, "id", None) or (tool_call.get("id", "") if isinstance(tool_call, dict) else "")
         tool = TOOLS_BY_NAME.get(name)
+        blocked = False
         if tool is None:
             observation = f"Unknown tool: {name}"
             logger.warning("Unknown tool: %s", name)
         else:
-            logger.info("Invoking tool: %s with args: %s", name, args)
-            try:
-                t0 = time.monotonic()
-                observation = tool.invoke(args)
-                elapsed = time.monotonic() - t0
-                logger.info(
-                    "Tool %s finished in %.1fs (result length=%s)",
-                    name,
-                    elapsed,
-                    len(str(observation)),
+            # --- Tool loop detection ---
+            tool_counts = getattr(_thread_local, "tool_call_counts", None)
+            if tool_counts is None:
+                tool_counts = {}
+                _thread_local.tool_call_counts = tool_counts
+            h = _tool_call_hash(name, args)
+            tool_counts[h] = tool_counts.get(h, 0) + 1
+            count = tool_counts[h]
+
+            if count >= TOOL_LOOP_BLOCK_THRESHOLD:
+                logger.warning(
+                    "Tool loop BLOCKED: %s called %d times with identical args", name, count,
                 )
-            except Exception as e:
-                logger.exception("Tool %s error: %s", name, e)
-                observation = f"Tool error: {e!r}"
+                observation = (
+                    f"BLOCKED: You have called {name} with identical arguments {count} times. "
+                    "This looks like an infinite loop. Try a different approach or tool."
+                )
+                blocked = True
+            else:
+                logger.info("Invoking tool: %s with args: %s", name, args)
+                try:
+                    t0 = time.monotonic()
+                    observation = tool.invoke(args)
+                    elapsed = time.monotonic() - t0
+                    logger.info(
+                        "Tool %s finished in %.1fs (result length=%s)",
+                        name,
+                        elapsed,
+                        len(str(observation)),
+                    )
+                except Exception as e:
+                    logger.exception("Tool %s error: %s", name, e)
+                    observation = f"Tool error: {e!r}"
+
+                if count >= TOOL_LOOP_WARN_THRESHOLD:
+                    logger.warning(
+                        "Tool loop WARNING: %s called %d times with identical args", name, count,
+                    )
+                    observation = str(observation) + (
+                        f"\n\n⚠️ WARNING: You have called {name} with identical arguments "
+                        f"{count} times. Vary your approach or move on."
+                    )
         # Auto-save to memory after research tools (plugin has "research" tag)
-        if "research" in TOOL_PLUGIN_TAGS.get(name, []):
+        # Skip if the call was blocked (nothing useful to save)
+        if not blocked and "research" in TOOL_PLUGIN_TAGS.get(name, []):
             obs_str = str(observation).strip()
             skip_error_prefixes = ("Tool error", "[memory_rag ERROR]", "[browser_research ERROR]")
             if not any(obs_str.startswith(p) for p in skip_error_prefixes):
@@ -227,7 +314,9 @@ def _tool_node(state: MessagesState) -> dict:
                         logger.info("Auto-saved research tool result to memory (tool=%s)", name)
                     except Exception as mem_err:
                         logger.warning("Auto-save to memory failed (tool=%s): %s", name, mem_err)
-        result.append(ToolMessage(content=str(observation), tool_call_id=call_id))
+        # Truncate observation to avoid blowing up context
+        obs_str = _truncate_observation(str(observation))
+        result.append(ToolMessage(content=obs_str, tool_call_id=call_id))
         _cb = getattr(_thread_local, "on_progress", None)
         if _cb:
             try:
@@ -309,6 +398,7 @@ def run_research(query: str, on_progress=None, effort: str = "normal") -> str:
         effort: One of "quick", "normal", "deep". Auto-upgrades to "deep" if deep keywords found.
     """
     _thread_local.on_progress = on_progress
+    _thread_local.tool_call_counts = {}
     # Auto-upgrade: if user asked for deep research but effort wasn't explicitly set to deep
     if effort == "normal" and _is_deep_research(query):
         effort = "deep"
