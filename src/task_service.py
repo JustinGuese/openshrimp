@@ -73,6 +73,7 @@ def create_task(
     priority: str = "medium",
     status: str = "pending",
     effort: str = "normal",
+    chat_id: int | None = None,
 ) -> int:
     """Insert a new Task row and return its id."""
     _ensure_db()
@@ -99,6 +100,7 @@ def create_task(
             priority=prio,
             status=st,
             effort=eff,
+            chat_id=chat_id,
         )
         session.add(task)
         session.commit()

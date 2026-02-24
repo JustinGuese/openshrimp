@@ -54,6 +54,7 @@ class TaskBase(SQLModel):
         default=Effort.NORMAL,
         sa_type=SQLAEnum(Effort, values_callable=lambda x: [e.value for e in x]),
     )
+    chat_id: int | None = Field(default=None)
     worker_id: str | None = Field(default=None)
     heartbeat_at: datetime | None = Field(default=None)
 

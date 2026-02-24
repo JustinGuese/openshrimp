@@ -642,6 +642,7 @@ async def _create_task_and_launch_agent(
             project_id=project_id,
             assignee_id=_agent_user_id,
             effort=effort,
+            chat_id=chat_id,
         )
     except Exception as e:
         logger.exception("Failed to create task in DB: %s", e)
@@ -885,6 +886,100 @@ async def _send_reminders(context) -> None:
             logger.warning("Failed to send reminder to chat %s: %s", pq.chat_id, e)
 
 
+PENDING_TASK_POLL_INTERVAL = int(os.environ.get("PENDING_TASK_POLL_INTERVAL", "30"))
+
+
+def _lookup_chat_id_for_user(user_id: int) -> int | None:
+    """Find a chat_id for a user via DashboardToken or existing tasks with chat_id set."""
+    try:
+        with Session(_db.get_engine()) as session:
+            from models import DashboardToken, Task as TaskModel
+            # Try DashboardToken first (most reliable — created by /dashboard or /status)
+            token_row = session.exec(
+                select(DashboardToken).where(DashboardToken.user_id == user_id)
+            ).first()
+            if token_row:
+                return token_row.chat_id
+            # Fallback: any task with chat_id for this user
+            task_row = session.exec(
+                select(TaskModel).where(
+                    TaskModel.user_id == user_id,
+                    TaskModel.chat_id != None,  # noqa: E711
+                ).order_by(TaskModel.id.desc())  # type: ignore[union-attr]
+            ).first()
+            if task_row:
+                return task_row.chat_id
+    except Exception as e:
+        logger.warning("Failed to look up chat_id for user %s: %s", user_id, e)
+    return None
+
+
+async def _process_pending_tasks(context) -> None:
+    """Pick up pending tasks assigned to the agent and launch workers."""
+    try:
+        pending = task_service.list_tasks(status="pending", assignee_id=_agent_user_id)
+    except Exception as e:
+        logger.warning("Failed to list pending tasks: %s", e)
+        return
+
+    if pending:
+        logger.info("Pending task scan: found %s pending task(s) assigned to agent.", len(pending))
+    else:
+        logger.debug("Pending task scan: no pending tasks for agent.")
+
+    for task in pending:
+        # Skip tasks already being processed (worker_id set)
+        if task.worker_id:
+            continue
+
+        chat_id = task.chat_id
+        # Fallback: look up chat_id from DashboardToken for the task's user
+        if not chat_id:
+            chat_id = _lookup_chat_id_for_user(task.user_id)
+            if chat_id:
+                logger.info("Task #%s has no chat_id; using fallback chat_id=%s from DashboardToken.", task.id, chat_id)
+            else:
+                logger.debug("Task #%s has no chat_id and no fallback found; skipping.", task.id)
+                continue
+
+        # Claim the task atomically by setting worker_id
+        try:
+            task_service.update_task(task.id, worker_id=WORKER_ID)
+        except Exception:
+            continue  # another worker got it
+        loop = asyncio.get_running_loop()
+        app = context.application
+        effort = task.effort.value if task.effort else "normal"
+        active_ctx = task_service.list_active_summary(user_id=_human_user_id)
+        query = _build_query(task.description, task.id, active_ctx)
+
+        logger.info("Auto-picking up pending task #%s for chat %s", task.id, chat_id)
+
+        # Send start notification
+        try:
+            effort_label = EFFORT_LABEL.get(effort, "")
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=BOT_PREFIX + f"⏳ Auto-resuming task #{task.id}{effort_label}…",
+            )
+        except Exception as e:
+            logger.warning("Failed to send auto-start message for task %s: %s", task.id, e)
+
+        loop.run_in_executor(
+            _executor,
+            functools.partial(
+                _run_agent_in_thread,
+                query=query,
+                chat_id=chat_id,
+                task_id=task.id,
+                task_title=task.title,
+                app=app,
+                loop=loop,
+                effort=effort,
+            ),
+        )
+
+
 async def _check_orphaned_tasks(context) -> None:
     """Watchdog: reset IN_PROGRESS tasks that have stopped sending heartbeats."""
     try:
@@ -934,6 +1029,7 @@ def main() -> None:
     if app.job_queue is not None:
         app.job_queue.run_repeating(_send_reminders, interval=300, first=30)
         app.job_queue.run_repeating(_check_orphaned_tasks, interval=300, first=60)
+        app.job_queue.run_repeating(_process_pending_tasks, interval=PENDING_TASK_POLL_INTERVAL, first=10)
     else:
         logger.warning(
             "Job queue not available (install python-telegram-bot[job-queue]). Reminders and watchdog disabled."

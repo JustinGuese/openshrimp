@@ -63,6 +63,7 @@ def _migrate_add_columns(engine) -> None:
         "ALTER TABLE task ADD COLUMN IF NOT EXISTS effort VARCHAR DEFAULT 'normal'",
         "ALTER TABLE task ADD COLUMN IF NOT EXISTS worker_id VARCHAR",
         "ALTER TABLE task ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP",
+        "ALTER TABLE task ADD COLUMN IF NOT EXISTS chat_id BIGINT",
     ]
     import sqlalchemy
     with engine.connect() as conn:
