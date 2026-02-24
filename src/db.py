@@ -57,29 +57,7 @@ def get_engine():
     return _engine
 
 
-def _migrate_add_columns(engine) -> None:
-    """Idempotently add new columns to existing tables (ALTER TABLE IF NOT EXISTS)."""
-    sqls = [
-        "ALTER TABLE task ADD COLUMN IF NOT EXISTS effort VARCHAR DEFAULT 'normal'",
-        "ALTER TABLE task ADD COLUMN IF NOT EXISTS worker_id VARCHAR",
-        "ALTER TABLE task ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP",
-        "ALTER TABLE task ADD COLUMN IF NOT EXISTS chat_id BIGINT",
-    ]
-    import sqlalchemy
-    with engine.connect() as conn:
-        for sql in sqls:
-            try:
-                conn.execute(sqlalchemy.text(sql))
-                conn.commit()
-            except Exception as exc:
-                conn.rollback()
-                # Column may already exist with a different error path — log and continue
-                import logging
-                logging.getLogger("db").debug("Migration skipped (%s): %s", sql, exc)
-
-
 def init_db() -> None:
     """Create all tables from SQLModel metadata if they do not exist."""
     engine = get_engine()
     SQLModel.metadata.create_all(engine)
-    _migrate_add_columns(engine)

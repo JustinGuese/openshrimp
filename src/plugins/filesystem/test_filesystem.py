@@ -1,10 +1,17 @@
 """Tests for the filesystem plugin: project-scoped file and folder operations."""
 
+import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from conftest import load_plugin_tools
+
+# Ensure src is importable for telegram_state
+_src = Path(__file__).resolve().parents[2]
+if str(_src) not in sys.path:
+    sys.path.insert(0, str(_src))
 
 TEST_PROJECT_ID = 999999
 
@@ -17,11 +24,16 @@ def filesystem_tools():
 @pytest.fixture(autouse=True)
 def cleanup_test_workspace():
     yield
+    import shutil
     root = Path(__file__).resolve().parent / "workspaces"
-    test_dir = root / str(TEST_PROJECT_ID)
+    # New path: workspaces/shared/<project_id>/ (no Telegram context in tests)
+    test_dir = root / "shared" / str(TEST_PROJECT_ID)
     if test_dir.exists():
-        import shutil
         shutil.rmtree(test_dir)
+    # Also clean old-style path if it exists
+    old_test_dir = root / str(TEST_PROJECT_ID)
+    if old_test_dir.exists():
+        shutil.rmtree(old_test_dir)
 
 
 def test_filesystem_tools_load(filesystem_tools):
@@ -154,3 +166,71 @@ def test_run_command_cwd_is_project_workspace(filesystem_tools):
     assert "ERROR" not in out
     assert "ran_in_workspace" in out
     assert "exit code: 0" in out
+
+
+# ---------------------------------------------------------------------------
+# Workspace path isolation tests
+# ---------------------------------------------------------------------------
+
+
+def _get_project_dir(project_id):
+    """Import _project_dir directly from the filesystem tool module."""
+    import importlib.util
+    tool_path = Path(__file__).resolve().parent / "tool.py"
+    spec = importlib.util.spec_from_file_location("fs_tool_mod", tool_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod._project_dir(project_id)
+
+
+def test_project_dir_uses_shared_when_no_context():
+    """Without a Telegram context, the workspace is under 'shared/'."""
+    import telegram_state
+    telegram_state.set_context(chat_id=0, bot_app=None, loop=None, telegram_user_id=None)
+    path = _get_project_dir(TEST_PROJECT_ID)
+    assert path.parts[-2] == "shared"
+
+
+def test_project_dir_uses_telegram_user_id_from_context():
+    """When a telegram_user_id is set in thread-local state, it appears in the path."""
+    import telegram_state
+    telegram_state.set_context(chat_id=0, bot_app=None, loop=None, telegram_user_id=12345)
+    path = _get_project_dir(TEST_PROJECT_ID)
+    assert "12345" in path.parts
+
+
+def test_project_dir_isolates_two_users():
+    """Two different telegram_user_ids produce different workspace paths."""
+    import telegram_state
+    telegram_state.set_context(chat_id=0, bot_app=None, loop=None, telegram_user_id=11111)
+    path_a = _get_project_dir(TEST_PROJECT_ID)
+    telegram_state.set_context(chat_id=0, bot_app=None, loop=None, telegram_user_id=22222)
+    path_b = _get_project_dir(TEST_PROJECT_ID)
+    assert path_a != path_b
+    assert "11111" in str(path_a)
+    assert "22222" in str(path_b)
+
+
+def test_project_dir_uses_project_name_when_available():
+    """When task_service returns a project, the directory uses its sanitized name."""
+    import telegram_state
+    telegram_state.set_context(chat_id=0, bot_app=None, loop=None, telegram_user_id=99999)
+
+    fake_project = MagicMock()
+    fake_project.name = "My Cool Project"
+
+    with patch("task_service.get_project", return_value=fake_project):
+        path = _get_project_dir(TEST_PROJECT_ID)
+
+    assert "My_Cool_Project" in path.parts
+
+
+def test_project_dir_falls_back_to_id_when_project_missing():
+    """When task_service returns None (project not found), falls back to project_id."""
+    import telegram_state
+    telegram_state.set_context(chat_id=0, bot_app=None, loop=None, telegram_user_id=99999)
+
+    with patch("task_service.get_project", return_value=None):
+        path = _get_project_dir(TEST_PROJECT_ID)
+
+    assert str(TEST_PROJECT_ID) in path.parts

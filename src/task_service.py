@@ -13,7 +13,7 @@ from datetime import datetime
 from sqlmodel import Session, select
 
 import db as _db
-from models import DashboardToken, Effort, Priority, Project, Task, TaskStatus
+from models import DashboardToken, Effort, Priority, Project, Task, TaskStatus, User
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,64 @@ def get_user_by_token(token: str) -> int | None:
     with Session(_db.get_engine()) as session:
         row = session.exec(select(DashboardToken).where(DashboardToken.token == token.strip())).first()
         return row.user_id if row else None
+
+
+# ---------------------------------------------------------------------------
+# User helpers
+# ---------------------------------------------------------------------------
+
+
+def get_user(user_id: int) -> User | None:
+    """Return a User by id, or None if not found."""
+    _ensure_db()
+    with Session(_db.get_engine()) as session:
+        return session.get(User, user_id)
+
+
+def get_or_create_telegram_user(telegram_user_id: int, name: str) -> int:
+    """Return DB user_id for a Telegram user, creating one if not found."""
+    _ensure_db()
+    with Session(_db.get_engine()) as session:
+        user = session.exec(
+            select(User).where(User.telegram_user_id == telegram_user_id)
+        ).first()
+        if user:
+            return user.id
+        user = User(
+            name=name,
+            email=f"tg_{telegram_user_id}@openshrimp.local",
+            passwordhash="",
+            telegram_user_id=telegram_user_id,
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        logger.info(
+            "Created DB user id=%s for Telegram user %s (%s).",
+            user.id, telegram_user_id, name,
+        )
+        return user.id
+
+
+def get_or_create_default_project(user_id: int) -> int:
+    """Return the default project_id for a user, creating it if needed."""
+    _ensure_db()
+    with Session(_db.get_engine()) as session:
+        project = session.exec(
+            select(Project).where(Project.user_id == user_id, Project.name == "Default")
+        ).first()
+        if project:
+            return project.id
+        project = Project(
+            name="Default",
+            user_id=user_id,
+            description="Default project",
+        )
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+        logger.info("Created default project id=%s for user_id=%s.", project.id, user_id)
+        return project.id
 
 
 # ---------------------------------------------------------------------------

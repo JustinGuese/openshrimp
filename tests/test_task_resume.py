@@ -152,9 +152,7 @@ def bot_globals(seed_users_project, monkeypatch):
     human_id, agent_id, project_id = seed_users_project
     import telegram_bot
 
-    monkeypatch.setattr(telegram_bot, "_human_user_id", human_id)
     monkeypatch.setattr(telegram_bot, "_agent_user_id", agent_id)
-    monkeypatch.setattr(telegram_bot, "_effective_project_id", project_id)
     monkeypatch.setattr(telegram_bot, "WORKER_ID", "test-worker-1")
     return human_id, agent_id, project_id
 

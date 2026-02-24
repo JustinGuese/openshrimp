@@ -15,6 +15,7 @@ class User(SQLModel, table=True):
     name: str
     email: str
     passwordhash: str
+    telegram_user_id: int | None = Field(default=None, index=True)
 
 class Project(SQLModel, table=True):
     id: int = Field(default=None, primary_key=True)

@@ -8,8 +8,6 @@ Usage:
 
 Required env vars:
     TELEGRAM_BOT_TOKEN       — from BotFather
-    DEFAULT_USER_ID          — DB user id for the human (default: auto-created)
-    DEFAULT_PROJECT_ID       — DB project id for created tasks (default: auto-created)
     DEFAULT_AGENT_USER_ID    — DB user id for the agent (default: auto-created)
 """
 
@@ -22,7 +20,7 @@ import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import urlparse
@@ -62,14 +60,13 @@ _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="agent-worker")
 # Unique identifier for this bot process — used to claim tasks and detect orphans from old processes
 WORKER_ID = f"tg-{uuid.uuid4().hex[:8]}"
 
-DEFAULT_USER_ID = int(os.environ.get("DEFAULT_USER_ID", "0"))
-DEFAULT_PROJECT_ID = int(os.environ.get("DEFAULT_PROJECT_ID", "0"))
 DEFAULT_AGENT_USER_ID = int(os.environ.get("DEFAULT_AGENT_USER_ID", "0"))
 
-# Resolved at startup by _ensure_default_user_and_project()
-_human_user_id: int = 0
+# Resolved at startup by _ensure_agent_user()
 _agent_user_id: int = 0
-_effective_project_id: int = 0
+
+# Per-Telegram-user cache: telegram_user_id → db_user_id
+_user_id_cache: dict[int, int] = {}
 
 AUTO_START_TASKS = os.environ.get("AUTO_START_TASKS", "true").strip().lower() in ("true", "1", "yes")
 
@@ -137,12 +134,28 @@ class _ProjectPending:
     auto_name: str  # proposed new project name
     message_id: int  # bot message with the keyboard; used to reject stale taps
     effort: str = "normal"
+    human_user_id: int = 0  # DB user_id for the Telegram user who sent the message
+    telegram_user_id: int | None = None  # raw Telegram user id
 
 
 _pending_project: dict[int, _ProjectPending] = {}  # keyed by chat_id
 
 # Remember last-used project per chat_id for the quick Yes/No confirmation flow
 _last_project: dict[int, int] = {}  # chat_id → project_id
+
+
+def _get_db_user_id(update: Update) -> int:
+    """Return (and cache) the DB user_id for the Telegram user in this update."""
+    tg_user = update.effective_user
+    if tg_user is None:
+        return 0
+    tg_id = tg_user.id
+    if tg_id in _user_id_cache:
+        return _user_id_cache[tg_id]
+    name = tg_user.full_name or tg_user.username or str(tg_id)
+    db_id = task_service.get_or_create_telegram_user(tg_id, name)
+    _user_id_cache[tg_id] = db_id
+    return db_id
 
 
 def _resolve_project(project_id: int | None) -> tuple[int, str] | None:
@@ -241,44 +254,16 @@ def _get_or_create_user(session: Session, user_id: int, name: str, email: str) -
     return user
 
 
-def _ensure_default_user_and_project() -> None:
-    """Create human user, agent user, and default project on startup if missing."""
-    global _human_user_id, _agent_user_id, _effective_project_id
+def _ensure_agent_user() -> None:
+    """Create the agent user on startup if missing."""
+    global _agent_user_id
     _db.init_db()
     with Session(_db.get_engine()) as session:
-        human = _get_or_create_user(
-            session, DEFAULT_USER_ID, "Telegram", "telegram@openshrimp.local"
-        )
-        _human_user_id = human.id
-
         agent = _get_or_create_user(
             session, DEFAULT_AGENT_USER_ID, "openshrimp", "agent@openshrimp.local"
         )
         _agent_user_id = agent.id
-
-        project_id = DEFAULT_PROJECT_ID
-        if project_id:
-            project = session.get(Project, project_id)
-        else:
-            project = None
-        if project is None:
-            project = Project(
-                name="Default",
-                user_id=_human_user_id,
-                description="Default project for Telegram tasks",
-            )
-            session.add(project)
-            session.commit()
-            session.refresh(project)
-            logger.info("Created default project id=%s.", project.id)
-        _effective_project_id = project.id
-
-    logger.info(
-        "Startup: human_user_id=%s agent_user_id=%s project_id=%s",
-        _human_user_id,
-        _agent_user_id,
-        _effective_project_id,
-    )
+    logger.info("Startup: agent_user_id=%s", _agent_user_id)
 
 
 def _reset_orphaned_tasks() -> None:
@@ -343,6 +328,8 @@ def _run_agent_in_thread(
     app: Application,
     loop: asyncio.AbstractEventLoop,
     effort: str = "normal",
+    human_user_id: int = 0,
+    telegram_user_id: int | None = None,
 ) -> None:
     """Execute the research agent and send the final answer back to the user."""
     logger.info("Agent worker START: task #%s '%s' (effort=%s, chat=%s)", task_id, task_title, effort, chat_id)
@@ -351,8 +338,9 @@ def _run_agent_in_thread(
         bot_app=app,
         loop=loop,
         task_id=task_id,
-        human_user_id=_human_user_id,
+        human_user_id=human_user_id,
         agent_user_id=_agent_user_id,
+        telegram_user_id=telegram_user_id,
     )
     try:
         task_service.update_task(
@@ -460,7 +448,8 @@ async def cmd_start(update: Update, context) -> None:
 async def cmd_dashboard(update: Update, context) -> None:
     """Send the user a secret URL to their scoped dashboard."""
     chat_id = update.effective_chat.id
-    url = _dashboard_url_for_chat(chat_id)
+    user_id = _get_db_user_id(update)
+    url = _dashboard_url_for_chat(user_id, chat_id)
     if _is_telegram_valid_url(url):
         keyboard = InlineKeyboardMarkup.from_row([
             InlineKeyboardButton("📊 Open dashboard", url=url),
@@ -475,19 +464,21 @@ async def cmd_dashboard(update: Update, context) -> None:
         )
 
 
-def _dashboard_url_for_chat(chat_id: int) -> str:
-    """Build the scoped dashboard URL for the current human user and chat."""
+def _dashboard_url_for_chat(user_id: int, chat_id: int) -> str:
+    """Build the scoped dashboard URL for the given user and chat."""
     base_url = (os.environ.get("DASHBOARD_BASE_URL", "http://localhost:8000") or "http://localhost:8000").rstrip("/")
-    token = task_service.get_or_create_dashboard_token(_human_user_id, chat_id)
+    token = task_service.get_or_create_dashboard_token(user_id, chat_id)
     return f"{base_url}/?token={token}"
 
 
 async def cmd_status(update: Update, context) -> None:
-    project = task_service.get_project(_effective_project_id)
-    use_table = context.args and context.args[0].lower() == "table"
+    user_id = _get_db_user_id(update)
     chat_id = update.effective_chat.id
-    dashboard_url = _dashboard_url_for_chat(chat_id)
+    use_table = context.args and context.args[0].lower() == "table"
+    dashboard_url = _dashboard_url_for_chat(user_id, chat_id)
 
+    current_proj_id = _last_project.get(chat_id)
+    project = task_service.get_project(current_proj_id) if current_proj_id else None
     if project:
         current_project_line_md = f"Current project: *{project.name}*\n\n"
         current_project_line_html = f"Current project: <b>{html.escape(project.name)}</b>\n\n"
@@ -495,33 +486,30 @@ async def cmd_status(update: Update, context) -> None:
         current_project_line_md = ""
         current_project_line_html = ""
 
-    dashboard_line_md = ""
-    dashboard_line_html = ""
-
     keyboard = _status_keyboard(dashboard_url)
     if use_table:
-        table_text = task_service.list_active_summary_table(user_id=_human_user_id)
+        table_text = task_service.list_active_summary_table(user_id=user_id)
         if table_text:
             escaped = html.escape(table_text)
-            body = BOT_PREFIX + current_project_line_html + f"<pre>{escaped}</pre>" + dashboard_line_html
+            body = BOT_PREFIX + current_project_line_html + f"<pre>{escaped}</pre>"
             await update.message.reply_text(body, parse_mode="HTML", reply_markup=keyboard)
         else:
             await update.message.reply_text(
-                BOT_PREFIX + current_project_line_html + "✅ No active tasks right now." + dashboard_line_html,
+                BOT_PREFIX + current_project_line_html + "✅ No active tasks right now.",
                 parse_mode="HTML",
                 reply_markup=keyboard,
             )
     else:
-        summary = task_service.list_active_summary_board(user_id=_human_user_id)
+        summary = task_service.list_active_summary_board(user_id=user_id)
         if summary:
             await update.message.reply_text(
-                BOT_PREFIX + current_project_line_md + summary + dashboard_line_md,
+                BOT_PREFIX + current_project_line_md + summary,
                 parse_mode="Markdown",
                 reply_markup=keyboard,
             )
         else:
             await update.message.reply_text(
-                BOT_PREFIX + current_project_line_md + "✅ No active tasks right now." + dashboard_line_md,
+                BOT_PREFIX + current_project_line_md + "✅ No active tasks right now.",
                 parse_mode="Markdown",
                 reply_markup=keyboard,
             )
@@ -533,13 +521,15 @@ async def on_status_refresh(update: Update, context) -> None:
     await query.answer()
 
     chat_id = update.effective_chat.id
-    dashboard_url = _dashboard_url_for_chat(chat_id)
+    user_id = _get_db_user_id(update)
+    dashboard_url = _dashboard_url_for_chat(user_id, chat_id)
 
-    project = task_service.get_project(_effective_project_id)
+    current_proj_id = _last_project.get(chat_id)
+    project = task_service.get_project(current_proj_id) if current_proj_id else None
     current_project_line = (
         f"Current project: *{project.name}*\n\n" if project else ""
     )
-    summary = task_service.list_active_summary_board(user_id=_human_user_id)
+    summary = task_service.list_active_summary_board(user_id=user_id)
     if summary:
         text = BOT_PREFIX + current_project_line + summary
     else:
@@ -586,7 +576,8 @@ async def cmd_loglevel(update: Update, context) -> None:
 
 async def cmd_project(update: Update, context) -> None:
     """Show project list so user can set the default project for new tasks."""
-    projects = task_service.list_projects(user_id=_human_user_id)
+    user_id = _get_db_user_id(update)
+    projects = task_service.list_projects(user_id=user_id)
     if not projects:
         await update.message.reply_text(BOT_PREFIX + "No projects yet. Send a task to create one.")
         return
@@ -636,6 +627,8 @@ async def _create_task_and_launch_agent(
     effort: str,
     app: Application,
     loop: asyncio.AbstractEventLoop,
+    human_user_id: int,
+    telegram_user_id: int | None,
     send_start_message: Callable[[str], Awaitable[None]],
     send_error_message: Callable[[str], Awaitable[None]],
 ) -> None:
@@ -647,7 +640,7 @@ async def _create_task_and_launch_agent(
         task_id = task_service.create_task(
             title=task_title,
             description=user_text,
-            user_id=_human_user_id,
+            user_id=human_user_id,
             project_id=project_id,
             assignee_id=_agent_user_id,
             effort=effort,
@@ -658,7 +651,7 @@ async def _create_task_and_launch_agent(
         await send_error_message(BOT_PREFIX + f"⚠️ Could not create task (DB error): {e}")
         return
 
-    active_ctx = task_service.list_active_summary(user_id=_human_user_id)
+    active_ctx = task_service.list_active_summary(user_id=human_user_id)
     research_query = _build_query(user_text, task_id, active_ctx)
 
     effort_label = EFFORT_LABEL.get(effort, "")
@@ -679,6 +672,8 @@ async def _create_task_and_launch_agent(
             app=app,
             loop=loop,
             effort=effort,
+            human_user_id=human_user_id,
+            telegram_user_id=telegram_user_id,
         ),
     )
 
@@ -692,10 +687,14 @@ async def _create_and_start_task(
     effort: str,
     app: Application,
     loop: asyncio.AbstractEventLoop,
+    human_user_id: int,
+    telegram_user_id: int | None,
 ) -> None:
     """Create a DB task and launch the agent worker. Shared by project selection handlers."""
     await _create_task_and_launch_agent(
         chat_id, project_id, project_name, user_text, effort, app, loop,
+        human_user_id=human_user_id,
+        telegram_user_id=telegram_user_id,
         send_start_message=lambda t: edit_target.edit_message_text(t, parse_mode="Markdown"),
         send_error_message=lambda t: edit_target.edit_message_text(t),
     )
@@ -710,10 +709,14 @@ async def _auto_start_task(
     effort: str,
     app: Application,
     loop: asyncio.AbstractEventLoop,
+    human_user_id: int,
+    telegram_user_id: int | None,
 ) -> None:
     """Create a DB task and launch the agent; no existing bot message to edit (use reply_text)."""
     await _create_task_and_launch_agent(
         chat_id, project_id, project_name, user_text, effort, app, loop,
+        human_user_id=human_user_id,
+        telegram_user_id=telegram_user_id,
         send_start_message=lambda t: update.message.reply_text(t, parse_mode="Markdown"),
         send_error_message=lambda t: update.message.reply_text(t),
     )
@@ -735,6 +738,8 @@ async def on_project_selected(update: Update, context) -> None:
     app = context.application
     user_text = pending.user_text
     effort = pending.effort
+    human_user_id = pending.human_user_id
+    telegram_user_id = pending.telegram_user_id
     data = query.data  # "proj:id:N" or "proj:new"
 
     if data.startswith("proj:id:"):
@@ -745,12 +750,16 @@ async def on_project_selected(update: Update, context) -> None:
         project = task_service.create_project(
             name=pending.auto_name,
             description=f"Created from task: {user_text[:200]}",
-            user_id=_human_user_id,
+            user_id=human_user_id,
         )
         project_id = project.id
         project_name = project.name
 
-    await _create_and_start_task(query, chat_id, project_id, project_name, user_text, effort, app, loop)
+    await _create_and_start_task(
+        query, chat_id, project_id, project_name, user_text, effort, app, loop,
+        human_user_id=human_user_id,
+        telegram_user_id=telegram_user_id,
+    )
 
 
 async def on_project_confirm(update: Update, context) -> None:
@@ -772,6 +781,8 @@ async def on_project_confirm(update: Update, context) -> None:
     data = query.data  # "projconfirm:yes:<id>" or "projconfirm:no"
     loop = asyncio.get_running_loop()
     app = context.application
+    human_user_id = pending.human_user_id
+    telegram_user_id = pending.telegram_user_id
 
     if data.startswith("projconfirm:yes:"):
         project_id = int(data.split(":")[-1])
@@ -784,6 +795,8 @@ async def on_project_confirm(update: Update, context) -> None:
             await _create_and_start_task(
                 query, chat_id, project_id, project.name,
                 pending.user_text, pending.effort, app, loop,
+                human_user_id=human_user_id,
+                telegram_user_id=telegram_user_id,
             )
             return
 
@@ -792,8 +805,8 @@ async def on_project_confirm(update: Update, context) -> None:
     user_text = pending.user_text
     effort = pending.effort
     auto_name = pending.auto_name
-    projects = task_service.list_projects(user_id=_human_user_id)
-    keyboard = _build_project_keyboard(projects, auto_name, _effective_project_id)
+    projects = task_service.list_projects(user_id=human_user_id)
+    keyboard = _build_project_keyboard(projects, auto_name, _last_project.get(chat_id, 0))
     result = await query.edit_message_text(
         BOT_PREFIX + "📋 Which project should I file this under?",
         reply_markup=keyboard,
@@ -805,7 +818,8 @@ async def on_project_confirm(update: Update, context) -> None:
     else:
         message_id = result.message_id
     _pending_project[chat_id] = _ProjectPending(
-        user_text=user_text, auto_name=auto_name, message_id=message_id, effort=effort
+        user_text=user_text, auto_name=auto_name, message_id=message_id, effort=effort,
+        human_user_id=human_user_id, telegram_user_id=telegram_user_id,
     )
 
 
@@ -826,13 +840,23 @@ async def on_message(update: Update, context) -> None:
         _human_input.resolve(chat_id, user_text)
         return
 
+    user_id = _get_db_user_id(update)
+    tg_user_id = update.effective_user.id if update.effective_user else None
+
     if AUTO_START_TASKS:
-        resolved = _resolve_project(_last_project.get(chat_id)) or _resolve_project(_effective_project_id)
+        resolved = _resolve_project(_last_project.get(chat_id))
+        if not resolved:
+            default_project_id = task_service.get_or_create_default_project(user_id)
+            resolved = _resolve_project(default_project_id)
         if resolved:
             effort = _detect_effort(user_text)
             loop = asyncio.get_running_loop()
             app = context.application
-            await _auto_start_task(update, chat_id, *resolved, user_text, effort, app, loop)
+            await _auto_start_task(
+                update, chat_id, *resolved, user_text, effort, app, loop,
+                human_user_id=user_id,
+                telegram_user_id=tg_user_id,
+            )
             return
 
     effort = _detect_effort(user_text)
@@ -860,18 +884,20 @@ async def on_message(update: Update, context) -> None:
             _pending_project[chat_id] = _ProjectPending(
                 user_text=user_text, auto_name=auto_name,
                 message_id=msg.message_id, effort=effort,
+                human_user_id=user_id, telegram_user_id=tg_user_id,
             )
             return
 
     # No remembered project — show full project selection keyboard
-    projects = task_service.list_projects(user_id=_human_user_id)
-    keyboard = _build_project_keyboard(projects, auto_name, _effective_project_id)
+    projects = task_service.list_projects(user_id=user_id)
+    keyboard = _build_project_keyboard(projects, auto_name, _last_project.get(chat_id, 0))
     msg = await update.message.reply_text(
         BOT_PREFIX + "📋 Which project should I file this under?",
         reply_markup=keyboard,
     )
     _pending_project[chat_id] = _ProjectPending(
-        user_text=user_text, auto_name=auto_name, message_id=msg.message_id, effort=effort
+        user_text=user_text, auto_name=auto_name, message_id=msg.message_id, effort=effort,
+        human_user_id=user_id, telegram_user_id=tg_user_id,
     )
 
 
@@ -931,10 +957,12 @@ async def _process_pending_tasks(context) -> None:
         logger.warning("Failed to list pending tasks: %s", e)
         return
 
-    if pending:
-        logger.info("Pending task scan: found %s pending task(s) assigned to agent.", len(pending))
+    # Only count actionable tasks (unclaimed)
+    actionable = [t for t in pending if not t.worker_id]
+    if actionable:
+        logger.info("Pending task scan: %s unclaimed pending task(s) to process.", len(actionable))
     else:
-        logger.debug("Pending task scan: no pending tasks for agent.")
+        logger.debug("Pending task scan: no actionable pending tasks.")
 
     for task in pending:
         # Skip tasks already being processed (worker_id set)
@@ -948,19 +976,23 @@ async def _process_pending_tasks(context) -> None:
             if chat_id:
                 logger.info("Task #%s has no chat_id; using fallback chat_id=%s from DashboardToken.", task.id, chat_id)
             else:
-                logger.debug("Task #%s has no chat_id and no fallback found; skipping.", task.id)
+                logger.warning("Task #%s has no chat_id and no fallback found; skipping.", task.id)
                 continue
 
-        # Claim the task atomically by setting worker_id
+        # Claim the task atomically by setting worker_id and status
         try:
-            task_service.update_task(task.id, worker_id=WORKER_ID)
+            task_service.update_task(task.id, worker_id=WORKER_ID, status="in_progress")
         except Exception:
             continue  # another worker got it
         loop = asyncio.get_running_loop()
         app = context.application
         effort = task.effort.value if task.effort else "normal"
-        active_ctx = task_service.list_active_summary(user_id=_human_user_id)
+        active_ctx = task_service.list_active_summary(user_id=task.user_id)
         query = _build_query(task.description, task.id, active_ctx)
+
+        # Look up the Telegram user id for filesystem workspace scoping
+        user_obj = task_service.get_user(task.user_id)
+        tg_user_id = user_obj.telegram_user_id if user_obj else None
 
         logger.info("Auto-picking up pending task #%s for chat %s", task.id, chat_id)
 
@@ -985,6 +1017,8 @@ async def _process_pending_tasks(context) -> None:
                 app=app,
                 loop=loop,
                 effort=effort,
+                human_user_id=task.user_id,
+                telegram_user_id=tg_user_id,
             ),
         )
 
@@ -1014,8 +1048,7 @@ def main() -> None:
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not set. Add it to .env or export it.")
 
-    _db.init_db()
-    _ensure_default_user_and_project()
+    _ensure_agent_user()
     _reset_orphaned_tasks()
     logger.info("DB initialized.")
 

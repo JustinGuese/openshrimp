@@ -1,11 +1,12 @@
 """Filesystem tool for openshrimp plugin system.
 
-Project-scoped file and folder operations. Workspace root: src/plugins/filesystem/workspaces/<project_id>/.
+Project-scoped file and folder operations. Workspace root: workspaces/<telegram_user_id>/<project_name>/.
 All paths are relative to that directory. Use search_replace_file for targeted edits; if old_string
 is not found, use write_file to replace the whole file. run_command runs terminal commands with
 the project workspace as the current working directory.
 """
 
+import re
 import shutil
 import subprocess
 import sys
@@ -27,8 +28,21 @@ def _workspace_root() -> Path:
     return Path(__file__).resolve().parent / "workspaces"
 
 
+def _sanitize_name(name: str) -> str:
+    """Convert a project name to a safe directory component."""
+    return re.sub(r"[^\w\-]", "_", name).strip("_") or "default"
+
+
 def _project_dir(project_id: int) -> Path:
-    return _workspace_root() / str(project_id)
+    import telegram_state
+    tg_user_id = telegram_state.get_telegram_user_id() or "shared"
+    try:
+        import task_service
+        project = task_service.get_project(project_id)
+        folder = _sanitize_name(project.name) if project else str(project_id)
+    except Exception:
+        folder = str(project_id)
+    return _workspace_root() / str(tg_user_id) / folder
 
 
 def _resolve(project_id: int, path: str, must_exist: bool = False) -> Path:
