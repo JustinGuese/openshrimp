@@ -168,10 +168,8 @@ def _create_llm(effort: str = "normal", model: str | None = None):
         temperature=0,
         api_key=api_key,
         timeout=LLM_TIMEOUT * 1000,  # SDK expects milliseconds
-        default_headers={
-            "HTTP-Referer": os.environ.get("YOUR_SITE_URL", "https://github.com/JustinGuese/openshrimp"),
-            "X-Title": "openShrimp",
-        },
+        app_url=os.environ.get("YOUR_SITE_URL", "https://github.com/JustinGuese/openshrimp"),
+        app_title="openShrimp",
     )
     if reasoning:
         kwargs["reasoning"] = reasoning
