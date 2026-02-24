@@ -51,6 +51,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("telegram_bot")
 
+# Suppress noisy HTTP request logs from httpx and telegram internals
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext.Application").setLevel(logging.WARNING)
+logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
+logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
+
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="agent-worker")
 
 # Unique identifier for this bot process — used to claim tasks and detect orphans from old processes
@@ -339,6 +345,7 @@ def _run_agent_in_thread(
     effort: str = "normal",
 ) -> None:
     """Execute the research agent and send the final answer back to the user."""
+    logger.info("Agent worker START: task #%s '%s' (effort=%s, chat=%s)", task_id, task_title, effort, chat_id)
     telegram_state.set_context(
         chat_id=chat_id,
         bot_app=app,
@@ -412,6 +419,8 @@ def _run_agent_in_thread(
             ).result(timeout=30)
     except Exception as e:
         logger.error("Failed to send final answer to chat %s: %s", chat_id, e)
+    status = "FAILED" if failed else "COMPLETED"
+    logger.info("Agent worker %s: task #%s '%s'", status, task_id, task_title)
 
 
 # ---------------------------------------------------------------------------

@@ -45,6 +45,16 @@ EFFORT_MODELS_FALLBACK: dict[str, str] = {
     "deep":   os.environ.get("OPENROUTER_MODEL_DEEP_FALLBACK",   "deepseek/deepseek-v3.2"),
 }
 
+# Optional: pass ChatOpenRouter's native reasoning.effort parameter to models that support it
+# (e.g. Claude Sonnet 4.5, DeepSeek R1). Defaults to "none" (disabled) since the primary
+# effort mechanism is model routing above. Set via env vars for reasoning-capable models.
+# Values: "none", "minimal", "low", "medium", "high", "xhigh"
+EFFORT_REASONING: dict[str, str] = {
+    "quick":  os.environ.get("OPENROUTER_REASONING_QUICK",  "none"),
+    "normal": os.environ.get("OPENROUTER_REASONING_NORMAL", "none"),
+    "deep":   os.environ.get("OPENROUTER_REASONING_DEEP",   "none"),
+}
+
 TOOLS = load_plugins()
 TOOLS_BY_NAME = {t.name: t for t in TOOLS}
 
@@ -146,13 +156,26 @@ def _create_llm(effort: str = "normal", model: str | None = None):
     if model is None:
         default_model = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v3.2")
         model = EFFORT_MODELS.get(effort, "").strip() or default_model
-    logger.info("Using model %s for effort=%s", model, effort)
-    llm = ChatOpenRouter(
+    # Build reasoning config from effort level
+    reasoning_effort = EFFORT_REASONING.get(effort, "").strip().lower()
+    reasoning = None
+    if reasoning_effort and reasoning_effort != "none":
+        reasoning = {"effort": reasoning_effort}
+
+    logger.info("Using model %s for effort=%s (reasoning=%s)", model, effort, reasoning_effort or "none")
+    kwargs = dict(
         model=model,
         temperature=0,
         api_key=api_key,
         timeout=LLM_TIMEOUT * 1000,  # SDK expects milliseconds
+        default_headers={
+            "HTTP-Referer": os.environ.get("YOUR_SITE_URL", "https://github.com/JustinGuese/openshrimp"),
+            "X-Title": "openShrimp",
+        },
     )
+    if reasoning:
+        kwargs["reasoning"] = reasoning
+    llm = ChatOpenRouter(**kwargs)
     return llm, model
 
 
