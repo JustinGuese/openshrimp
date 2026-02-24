@@ -653,7 +653,10 @@ async def _create_task_and_launch_agent(
 
     effort_label = EFFORT_LABEL.get(effort, "")
     start_text = BOT_PREFIX + f"⏳ Starting task #{task_id}{effort_label} in project *{project_name}*…"
-    await send_start_message(start_text)
+    try:
+        await send_start_message(start_text)
+    except Exception as e:
+        logger.warning("Failed to send start message for task %s: %s", task_id, e)
 
     loop.run_in_executor(
         _executor,
