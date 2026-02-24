@@ -108,11 +108,13 @@ No web UI to deploy. No frontend to configure. Telegram is the interface. Send a
 | Variable | Description |
 |----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | **Required.** From BotFather. |
-| `DEFAULT_USER_ID`, `DEFAULT_PROJECT_ID`, `DEFAULT_AGENT_USER_ID` | Optional. DB ids for the human, default project, and agent (default: auto-created). |
+| `DEFAULT_AGENT_USER_ID` | Optional. DB id for the agent user (default: auto-created on startup). |
 | `DASHBOARD_BASE_URL` | Base URL for dashboard links the bot sends (default: `http://localhost:8000`). |
 | `AUTO_START_TASKS` | If true (default), start tasks immediately using last/default project; if false, show project picker each time. |
 | `AGENT_MAX_RETRIES` | Number of retries on transient failures (e.g. timeouts, 5xx). Default: 2. Retry backoff is capped below the watchdog so in-progress tasks are not reset during retries. |
 | `HEARTBEAT_WATCHDOG_MINUTES` | Minutes without a heartbeat before an IN_PROGRESS task is reset to pending. Default: 10. |
+
+**Multi-user support:** Each Telegram account automatically gets its own DB user row, default project, task history, and filesystem workspace (`workspaces/<telegram_user_id>/<project_name>/`). No configuration required — isolation is automatic on first message.
 
 
 #### 6. Stealth Web Research That Actually Works
@@ -212,7 +214,7 @@ Each plugin lives in `src/plugins/<name>/` with a `manifest.json` and a `tool.py
 | `task_tracking` | Create, update, and list tasks from within the agent |
 | `telegram_notify` | Send mid-research messages to the user |
 | `human_input` | Ask the user a question and block until they reply |
-| `filesystem` | Read/write/search files in the project workspace |
+| `filesystem` | Read/write/search files in the project workspace (`workspaces/<telegram_user_id>/<project_name>/`) |
 
 
 ### Dashboard Access

@@ -21,6 +21,12 @@ if str(_src) not in sys.path:
 from schemas import ToolResult
 
 
+def _get_user_id() -> int | None:
+    """Return the current human user ID from thread-local state, or None if not in a Telegram context."""
+    import telegram_state
+    return telegram_state.get_human_user_id()
+
+
 # Embedding dimension for sentence-transformers/all-minilm-l6-v2 (and most all-MiniLM models)
 EMBEDDING_DIMENSION = 384
 
@@ -97,6 +103,9 @@ def memory_add(content: str, source: str = "") -> str:
             )
             return result.to_string()
         metadata = {} if not source.strip() else {"source": source.strip()}
+        user_id = _get_user_id()
+        if user_id is not None:
+            metadata["user_id"] = user_id
         ids = store.add_texts([text], metadatas=[metadata])
         result = ToolResult(
             status="ok",
@@ -128,7 +137,9 @@ def memory_retrieve(query: str, top_k: int = 5) -> str:
     """
     try:
         store = _get_vector_store()
-        docs = store.similarity_search(query, k=min(max(1, top_k), 20))
+        user_id = _get_user_id()
+        filter_dict = {"user_id": user_id} if user_id is not None else None
+        docs = store.similarity_search(query, k=min(max(1, top_k), 20), filter=filter_dict)
         if not docs:
             result = ToolResult(
                 status="ok",

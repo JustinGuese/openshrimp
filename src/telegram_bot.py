@@ -361,7 +361,6 @@ def _run_agent_in_thread(
     for attempt in range(max_attempts):
         try:
             body = run_research(query, on_progress=on_progress, effort=effort) or "(No answer produced)"
-            task_service.update_task(task_id, status=TaskStatus.COMPLETED.value)
             break
         except Exception as e:
             logger.exception("Agent failed for task %s: %s", task_id, e)
@@ -392,6 +391,20 @@ def _run_agent_in_thread(
                 except Exception:
                     pass
                 break
+
+    # Agent owns terminal status: only it may set completed/failed via tools
+    task = task_service.get_task(task_id)
+    if task and task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+        task_service.update_task(
+            task_id,
+            status=TaskStatus.FAILED.value,
+            notes=f"## Auto-closed (agent did not explicitly complete)\n{body[:500]}",
+        )
+        failed = True
+    if task and task.status == TaskStatus.COMPLETED and body and body.strip():
+        existing = (task.notes or "").strip()
+        new_notes = (existing + "\n\n## Agent Response\n" + body[:2000]) if existing else ("## Agent Response\n" + body[:2000])
+        task_service.update_task(task_id, notes=new_notes)
 
     if failed:
         answer = BOT_PREFIX + f"❌ Task #{task_id} failed:\n\n{body}\n\n---\nTask: {task_title}"

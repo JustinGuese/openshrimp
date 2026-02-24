@@ -70,7 +70,12 @@ When you receive a task ID like [Your task ID is #N], you MUST follow these rule
    - "Searched X API docs — REST only, no official SDK found. Next: check GitHub issues for SDK requests."
    - "Compared A vs B — A has better docs and community support. Remaining: check performance benchmarks."
 
-3. **Before marking completed — REQUIRED final summary**: You MUST call update_task(task_id=N, status="completed", notes="## Result\n<thorough summary with findings, conclusions, and recommendations>"). Never set status to "completed" without notes containing a real result.
+3. **Before marking completed — verify you ACTUALLY did the work**:
+   - ONLY mark completed if you performed the requested action (posted, wrote, searched, called APIs, ran tools, etc.).
+   - If you could only SUGGEST or PLAN what to do (but could not execute), mark FAILED with your suggestions in the notes.
+   - If you need user action to continue (e.g. credentials, confirmation), use ask_human — do NOT complete.
+   - Call: update_task(task_id=N, status="completed", notes="## Result\n<what you DID, not what you SUGGEST>").
+   - Notes must describe actions taken and their outcomes, not just recommendations.
 
 4. **Before marking failed — REQUIRED self-challenge**: Before giving up:
    a. Call update_task(task_id=N, notes="Considering failure — reason: <why>. Trying alternatives...")
