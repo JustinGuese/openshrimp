@@ -57,6 +57,8 @@ class TaskBase(SQLModel):
     )
     chat_id: int | None = Field(default=None)
     worker_id: str | None = Field(default=None)
+    scheduled_at: datetime | None = Field(default=None, index=True)
+    repeat_interval_seconds: int | None = Field(default=None)
     heartbeat_at: datetime | None = Field(default=None)
 
 
@@ -72,3 +74,14 @@ class DashboardToken(SQLModel, table=True):
     user_id: int = Field(foreign_key="user.id")
     chat_id: int  # Telegram chat_id for reference
     created_at: datetime = Field(default_factory=datetime.now)
+
+
+class Credential(SQLModel, table=True):
+    id: int = Field(default=None, primary_key=True)
+    user_id: int | None = Field(default=None, foreign_key="user.id")
+    project_id: int | None = Field(default=None, foreign_key="project.id")
+    name: str = Field(index=True)
+    value_encrypted: str
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+    last_used_at: datetime | None = Field(default=None)

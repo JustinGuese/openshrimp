@@ -132,6 +132,8 @@ def create_task(
     status: str = "pending",
     effort: str = "normal",
     chat_id: int | None = None,
+    scheduled_at: datetime | None = None,
+    repeat_interval_seconds: int | None = None,
 ) -> int:
     """Insert a new Task row and return its id."""
     _ensure_db()
@@ -159,6 +161,8 @@ def create_task(
             status=st,
             effort=eff,
             chat_id=chat_id,
+            scheduled_at=scheduled_at,
+            repeat_interval_seconds=repeat_interval_seconds,
         )
         session.add(task)
         session.commit()
@@ -207,6 +211,7 @@ def list_tasks(
     user_id: int | None = None,
     status: str | None = None,
     assignee_id: int | None = _UNSET,  # type: ignore[assignment]
+    scheduled_before: datetime | None = None,
 ) -> list[Task]:
     """Return tasks, optionally filtered by project, user, status, or assignee."""
     _ensure_db()
@@ -224,6 +229,15 @@ def list_tasks(
                 pass
         if assignee_id is not _UNSET:
             q = q.where(Task.assignee_id == assignee_id)
+        if scheduled_before is not None:
+            from sqlalchemy import or_
+
+            q = q.where(
+                or_(
+                    Task.scheduled_at == None,  # noqa: E711
+                    Task.scheduled_at <= scheduled_before,
+                )
+            )
         q = q.order_by(Task.id)
         return list(session.exec(q))
 
@@ -246,6 +260,7 @@ def update_task(
         task = session.get(Task, task_id)
         if task is None:
             raise ValueError(f"No task with id={task_id}")
+        old_status = task.status
         if status is not None:
             try:
                 task.status = TaskStatus(status.lower())
@@ -259,8 +274,40 @@ def update_task(
             task.pending_question = pending_question  # type: ignore[assignment]
         if worker_id is not _UNSET:
             task.worker_id = worker_id  # type: ignore[assignment]
+
+        # If this task just transitioned to COMPLETED and has a repeat interval,
+        # enqueue the next occurrence as a new pending task scheduled in the future.
+        next_task: Task | None = None
+        if (
+            old_status != TaskStatus.COMPLETED
+            and task.status == TaskStatus.COMPLETED
+            and task.repeat_interval_seconds
+            and task.repeat_interval_seconds > 0
+        ):
+            from datetime import timedelta
+
+            scheduled_at = datetime.now() + timedelta(seconds=task.repeat_interval_seconds)
+            next_task = Task(
+                title=task.title,
+                description=task.description,
+                user_id=task.user_id,
+                project_id=task.project_id,
+                assignee_id=task.assignee_id,
+                priority=task.priority,
+                status=TaskStatus.PENDING,
+                pending_question=None,
+                effort=task.effort,
+                chat_id=task.chat_id,
+                worker_id=None,
+                heartbeat_at=None,
+                scheduled_at=scheduled_at,
+                repeat_interval_seconds=task.repeat_interval_seconds,
+            )
+
         task.updated_at = datetime.now()
         session.add(task)
+        if next_task is not None:
+            session.add(next_task)
         session.commit()
         session.refresh(task)
         return task

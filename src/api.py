@@ -107,6 +107,8 @@ def _task_to_read(task: Task) -> TaskRead:
         effort=task.effort,
         created_at=task.created_at,
         updated_at=task.updated_at,
+        scheduled_at=task.scheduled_at,
+        repeat_interval_seconds=task.repeat_interval_seconds,
     )
 
 
@@ -161,6 +163,8 @@ def create_task(
         priority=body.priority,
         status=body.status,
         assignee_id=getattr(body, "assignee_id", None),
+        scheduled_at=getattr(body, "scheduled_at", None),
+        repeat_interval_seconds=getattr(body, "repeat_interval_seconds", None),
     )
     session.add(task)
     session.commit()

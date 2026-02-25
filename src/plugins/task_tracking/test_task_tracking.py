@@ -2,9 +2,15 @@
 
 
 def test_task_tracking_tools_load(load_plugin_tools_fixture):
-    """This plugin exposes create_task, list_tasks, get_task, update_task_status."""
+    """This plugin exposes core task tools including follow-up scheduling."""
     load_plugin_tools = load_plugin_tools_fixture
     tools = load_plugin_tools("task_tracking")
     names = [t.name for t in tools]
-    for expected in ("create_task", "list_tasks", "get_task", "update_task_status"):
+    for expected in (
+        "create_task",
+        "schedule_followup_task",
+        "list_tasks",
+        "get_task",
+        "update_task_status",
+    ):
         assert expected in names, f"Expected tool {expected} in {names}"

@@ -1,0 +1,20 @@
+{
+  "name": "browser",
+  "description": "Interactive browser: navigate, click, type, inspect DOM, scroll, and extract text.",
+  "version": "0.2.0",
+  "tags": ["web", "browser", "research"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "action": {"type": "string", "description": "One of: navigate, read, inspect, click, type, press_key, scroll, wait, clear_cookies"},
+      "url": {"type": "string", "description": "For navigate: full URL to open"},
+      "selector": {"type": "string", "description": "CSS selector for click, type, or wait"},
+      "text": {"type": "string", "description": "For type: text to type into the field"},
+      "key": {"type": "string", "description": "For press_key: e.g. Enter, Tab, Escape"},
+      "direction": {"type": "string", "description": "For scroll: up, down, left, right"},
+      "amount": {"type": "integer", "description": "For scroll: pixels to scroll"},
+      "timeout_ms": {"type": "integer", "description": "Timeout in ms for click, type, wait"}
+    },
+    "required": ["action"]
+  }
+}

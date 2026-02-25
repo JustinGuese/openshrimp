@@ -23,6 +23,11 @@ DEEP_RESEARCH_MAX_TOOL_ROUNDS = int(os.environ.get("AGENT_DEEP_MAX_TOOL_ROUNDS",
 
 TOOL_LOOP_WARN_THRESHOLD  = int(os.environ.get("TOOL_LOOP_WARN_THRESHOLD", "3"))
 TOOL_LOOP_BLOCK_THRESHOLD = int(os.environ.get("TOOL_LOOP_BLOCK_THRESHOLD", "5"))
+# Per-tool-name frequency limits (catches varied-args loops like browsing 7 different URLs)
+TOOL_NAME_WARN_THRESHOLD  = int(os.environ.get("TOOL_NAME_WARN_THRESHOLD", "4"))
+TOOL_NAME_BLOCK_THRESHOLD = int(os.environ.get("TOOL_NAME_BLOCK_THRESHOLD", "7"))
+TOOL_NAME_WARN_OVERRIDES = {"browser": 10}
+TOOL_NAME_BLOCK_OVERRIDES = {"browser": 20}
 TOOL_RESULT_MAX_CHARS = int(os.environ.get("TOOL_RESULT_MAX_CHARS", "15000"))
 
 # Effort → max tool rounds mapping
@@ -58,7 +63,7 @@ EFFORT_REASONING: dict[str, str] = {
 TOOLS = load_plugins()
 TOOLS_BY_NAME = {t.name: t for t in TOOLS}
 
-SYSTEM_PROMPT_BASE = """You are a research assistant. Use available tools to look up or verify information when needed. Visit relevant URLs and summarize findings to answer the user's question.
+SYSTEM_PROMPT_BASE = """You are a task assistant. Use available tools to look up or verify information when needed. Visit relevant URLs and summarize findings to answer the user's question.
 
 ## Task tracking rules (MANDATORY):
 When you receive a task ID like [Your task ID is #N], you MUST follow these rules strictly:
@@ -86,6 +91,41 @@ When you receive a task ID like [Your task ID is #N], you MUST follow these rule
 
 Once you have enough information, respond with your final summary and recommendations without making further tool calls.
 When editing project files, use the filesystem tools (read_file, write_file, search_replace_file, etc.) with the task's project_id so files live in that project's workspace. Prefer search_replace_file for targeted edits; if it reports the old string was not found, use write_file to replace the whole file.
+
+## Browser tool (interactive):
+Your `browser` tool can navigate web pages AND interact with them. Supported actions:
+- navigate(url) — go to a URL, returns page text
+- read() — get current page text
+- inspect() — get simplified DOM tree with CSS selectors (use this to find what to click/type)
+- click(selector) — click an element by CSS selector
+- type(selector, text) — type text into an input field
+- press_key(key) — press Enter, Tab, Escape, etc.
+- scroll(direction, amount) — scroll up/down
+- wait(selector) — wait for an element to appear
+
+**Workflow for interactive tasks** (e.g. posting on social media):
+1. navigate to the site
+2. inspect to find form fields and buttons
+3. type credentials / content into fields
+4. click submit buttons
+5. read to verify the result
+
+If a site requires login credentials you don't have, use ask_human to request them.
+Always use telegram_send to inform the user before performing sensitive actions (posting, purchasing, deleting).
+
+## Credential vault (encrypted secrets):
+Use the credential_vault tools to store and retrieve passwords or API tokens **per project**:
+- store_credential(name, secret) — encrypts and saves a secret for the current task's project
+- get_credential(name) — retrieves a previously stored secret for this project
+- list_credentials() — lists available credential names (no values)
+- delete_credential(name) — removes a stored secret
+
+Workflow for login flows:
+1. Before asking the human for credentials, call get_credential() with a stable name like "twitter/main" or "github/personal".
+2. If a credential exists, use it directly in browser.type() or HTTP requests.
+3. If none exists, call ask_human once to obtain the credential, then immediately call store_credential() so future tasks can log in without asking again.
+
+Your available tools: browser (navigate, read, click, type, inspect), credential_vault (encrypted credential storage), memory_search/memory_add (RAG), update_task/create_task (task tracking), telegram_send (message user), ask_human (ask user a question), read_file/write_file/search_replace_file (project files).
 
 ## Rules for ask_human (STRICT):
 - ONLY ask when you genuinely cannot proceed without user input.
@@ -283,7 +323,7 @@ def _tool_node(state: MessagesState) -> dict:
             observation = f"Unknown tool: {name}"
             logger.warning("Unknown tool: %s", name)
         else:
-            # --- Tool loop detection ---
+            # --- Tool loop detection (identical args) ---
             tool_counts = getattr(_thread_local, "tool_call_counts", None)
             if tool_counts is None:
                 tool_counts = {}
@@ -292,6 +332,14 @@ def _tool_node(state: MessagesState) -> dict:
             tool_counts[h] = tool_counts.get(h, 0) + 1
             count = tool_counts[h]
 
+            # --- Per-tool-name frequency detection (varied args) ---
+            tool_name_counts = getattr(_thread_local, "tool_name_counts", None)
+            if tool_name_counts is None:
+                tool_name_counts = {}
+                _thread_local.tool_name_counts = tool_name_counts
+            tool_name_counts[name] = tool_name_counts.get(name, 0) + 1
+            name_count = tool_name_counts[name]
+
             if count >= TOOL_LOOP_BLOCK_THRESHOLD:
                 logger.warning(
                     "Tool loop BLOCKED: %s called %d times with identical args", name, count,
@@ -299,6 +347,17 @@ def _tool_node(state: MessagesState) -> dict:
                 observation = (
                     f"BLOCKED: You have called {name} with identical arguments {count} times. "
                     "This looks like an infinite loop. Try a different approach or tool."
+                )
+                blocked = True
+            elif name_count >= TOOL_NAME_BLOCK_OVERRIDES.get(name, TOOL_NAME_BLOCK_THRESHOLD):
+                logger.warning(
+                    "Tool frequency BLOCKED: %s called %d times total", name, name_count,
+                )
+                observation = (
+                    f"BLOCKED: You have called {name} {name_count} times this session. "
+                    "You are stuck in a loop. Stop using this tool and either: "
+                    "(1) use a DIFFERENT tool, (2) provide your final answer, or "
+                    "(3) mark the task as failed explaining what you could not do."
                 )
                 blocked = True
             else:
@@ -325,11 +384,20 @@ def _tool_node(state: MessagesState) -> dict:
                         f"\n\n⚠️ WARNING: You have called {name} with identical arguments "
                         f"{count} times. Vary your approach or move on."
                     )
+                elif name_count >= TOOL_NAME_WARN_OVERRIDES.get(name, TOOL_NAME_WARN_THRESHOLD):
+                    logger.warning(
+                        "Tool frequency WARNING: %s called %d times total", name, name_count,
+                    )
+                    observation = str(observation) + (
+                        f"\n\n⚠️ WARNING: You have called {name} {name_count} times this session. "
+                        "Consider whether you are making progress. If not, try a different "
+                        "approach or wrap up with what you have."
+                    )
         # Auto-save to memory after research tools (plugin has "research" tag)
         # Skip if the call was blocked (nothing useful to save)
         if not blocked and "research" in TOOL_PLUGIN_TAGS.get(name, []):
             obs_str = str(observation).strip()
-            skip_error_prefixes = ("Tool error", "[memory_rag ERROR]", "[browser_research ERROR]")
+            skip_error_prefixes = ("Tool error", "[memory_rag ERROR]", "[browser ERROR]")
             if not any(obs_str.startswith(p) for p in skip_error_prefixes):
                 memory_add_tool = TOOLS_BY_NAME.get("memory_add")
                 if memory_add_tool:
@@ -375,7 +443,7 @@ def _should_continue(state: MessagesState):
 
 
 def create_research_agent():
-    """Build and return a compiled LangGraph agent with tool-calling and browser research."""
+    """Build and return a compiled LangGraph agent with tool-calling and browser interaction."""
     builder = StateGraph(MessagesState)
     builder.add_node("llm_call", _llm_call)
     builder.add_node("tool_node", _tool_node)
@@ -415,21 +483,22 @@ def _fallback_summary(query: str, messages: list) -> str:
     return f"⚠️ Hit tool-call limit; here's a summary of what was found:\n\n{result}"
 
 
-def run_research(query: str, on_progress=None, effort: str = "normal") -> str:
-    """Run the research agent on a query and return the final assistant message content.
+def run_agent(query: str, on_progress=None, effort: str = "normal") -> str:
+    """Run the task agent on a query and return the final assistant message content.
 
     Args:
-        query: The research query.
+        query: The task or research query.
         on_progress: Optional callback(tool_name, args, observation) called after each tool.
         effort: One of "quick", "normal", "deep". Auto-upgrades to "deep" if deep keywords found.
     """
     _thread_local.on_progress = on_progress
     _thread_local.tool_call_counts = {}
+    _thread_local.tool_name_counts = {}
     # Auto-upgrade: if user asked for deep research but effort wasn't explicitly set to deep
     if effort == "normal" and _is_deep_research(query):
         effort = "deep"
     max_rounds = EFFORT_ROUNDS.get(effort, DEFAULT_MAX_TOOL_ROUNDS)
-    logger.info("Invoking research agent... (max_tool_rounds=%s, effort=%s)", max_rounds, effort)
+    logger.info("Invoking task agent... (max_tool_rounds=%s, effort=%s)", max_rounds, effort)
     agent = create_research_agent()
     config = {
         "recursion_limit": _recursion_limit(max_rounds),

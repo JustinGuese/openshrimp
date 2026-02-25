@@ -15,7 +15,7 @@ class ToolResult(SQLModel, table=False):
 
     status: Literal["ok", "error"]
     data: str  # always a string for LLM consumption
-    plugin: str  # plugin name, e.g. "browser_research"
+    plugin: str  # plugin name, e.g. "browser"
     extra: dict[str, Any] = {}  # plugin-specific; avoid name "metadata" (shadows SQLModel.metadata)
 
     def to_string(self) -> str:

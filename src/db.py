@@ -10,7 +10,7 @@ import psycopg2
 from sqlalchemy import create_engine
 from sqlmodel import SQLModel
 
-from models import Task, Project, User, DashboardToken  # noqa: F401 — ensure all tables registered
+from models import Task, Project, User, DashboardToken, Credential  # noqa: F401 — ensure all tables registered
 
 
 def _connection_params():

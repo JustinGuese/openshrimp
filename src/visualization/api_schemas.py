@@ -21,6 +21,8 @@ class TaskRead(SQLModel):
     effort: Effort = Effort.NORMAL
     created_at: datetime
     updated_at: datetime
+    scheduled_at: datetime | None = None
+    repeat_interval_seconds: int | None = None
 
 
 class TaskCreate(TaskBase):
@@ -36,3 +38,5 @@ class TaskUpdate(SQLModel):
     status: TaskStatus | None = None
     priority: Priority | None = None
     assignee_id: int | None = None
+    scheduled_at: datetime | None = None
+    repeat_interval_seconds: int | None = None

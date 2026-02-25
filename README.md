@@ -9,7 +9,7 @@
 </p>
 <p align="center"><em>Use openShrimp in Telegram: send a message, get research. <code>/dashboard</code> for your task board.</em></p>
 
-Persistent, task-driven LangGraph research agent with a modular plugin system, PostgreSQL-backed state, and a zero-setup Telegram interface.
+Persistent, task-driven LangGraph agent with a modular plugin system, PostgreSQL-backed state, and a zero-setup Telegram interface.
 
 > Think OpenClaw with task planning, less token usage and better anti-bot-measure avoidance
 
@@ -117,9 +117,9 @@ No web UI to deploy. No frontend to configure. Telegram is the interface. Send a
 **Multi-user support:** Each Telegram account automatically gets its own DB user row, default project, task history, and filesystem workspace (`workspaces/<telegram_user_id>/<project_name>/`). No configuration required — isolation is automatic on first message.
 
 
-#### 6. Stealth Web Research That Actually Works
+#### 6. Interactive Browser
 
-This was the other big pain point. OpenClaw's browser gets blocked constantly — anti-bot detection, CAPTCHAs, fingerprinting. Every other research task would stall because a website refused to serve the page.
+The agent's browser tool can not only read pages but interact with them: navigate, click, type, fill forms, and submit. So it can log in, post on social media, or complete web flows — not just extract text.
 
 openShrimp uses a hardened browsing stack:
 
@@ -129,12 +129,36 @@ openShrimp uses a hardened browsing stack:
 * User-agent rotation and fingerprint control
 * Automatic local Chrome fallback if the remote browser is unavailable
 
-The result: long-running research sessions that don't get interrupted by "please verify you're human" walls.
+The result: long-running research and interactive sessions that don't get interrupted by "please verify you're human" walls.
+
+
+#### 7. Credential Vault & Scheduled Tasks
+
+openShrimp includes an encrypted credential vault and a simple scheduler so the agent can work more autonomously:
+
+* **Credential vault (`credential_vault` plugin)** — store passwords or API tokens per project, encrypted with a Fernet key from `OPENSHRIMP_VAULT_KEY`.
+  * Set `OPENSHRIMP_VAULT_KEY` to a Fernet key (generate with `from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())`).
+  * Inside tasks, use the `credential_vault` tools:
+    * `store_credential(name, secret)` — save a secret for the current task's project
+    * `get_credential(name)` — retrieve a stored secret
+    * `list_credentials()` / `delete_credential(name)` — inspect or clean up entries
+  * Recommended login flow:
+    1. Try `get_credential("twitter/main")` (or similar stable name) before asking the user.
+    2. If missing, use `ask_human` once to get credentials.
+    3. Immediately call `store_credential(...)` so future tasks can log in without asking again.
+
+* **Scheduled and recurring tasks** — tasks can now be scheduled in the future and made recurring:
+  * Core model fields:
+    * `scheduled_at` — when the task becomes eligible to run.
+    * `repeat_interval_seconds` — if set, a new task is automatically queued `repeat_interval_seconds` after completion.
+  * The Telegram bot's background worker only picks up tasks that are `pending` **and** due (`scheduled_at` is null or in the past).
+  * From within a task, use the `task_tracking.schedule_followup_task` tool to create follow-ups:
+    * e.g. "check engagement" 4h after posting, or a daily recurring task.
 
 
 ### What openShrimp Is
 
-* A **LangGraph-based** autonomous research agent
+* A **LangGraph-based** autonomous task agent
 * With **persistent task tracking** in PostgreSQL
 * Long-term memory via **PGVector**
 * A **plugin-first** tool architecture
@@ -209,7 +233,7 @@ Each plugin lives in `src/plugins/<name>/` with a `manifest.json` and a `tool.py
 
 | Plugin | What it does |
 |--------|-------------|
-| `browser_research` | Stealth Chromium browsing with CAPTCHA solving |
+| `browser` | Interactive Chromium browser with stealth, CAPTCHA solving, and page interaction (click, type, submit) |
 | `memory_rag` | Long-term memory via PGVector (add/retrieve) |
 | `task_tracking` | Create, update, and list tasks from within the agent |
 | `telegram_notify` | Send mid-research messages to the user |

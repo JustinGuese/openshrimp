@@ -1,6 +1,6 @@
 """Telegram bot frontend for openshrimp agent.
 
-Polls for messages, creates a DB task for each request, runs the research agent
+Polls for messages, creates a DB task for each request, runs the task agent
 in a thread pool, and sends live progress updates back to the user.
 
 Usage:
@@ -19,6 +19,7 @@ import os
 import sys
 import time
 import uuid
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,8 +39,9 @@ import db as _db
 import human_input as _human_input
 import task_service
 import telegram_state
-from agent import run_research
+from agent import run_agent
 from models import Project, TaskStatus, User
+from playbooks import detect as _detect_playbook
 
 logging.basicConfig(
     level=logging.INFO,
@@ -285,6 +287,9 @@ def _build_query(user_text: str, task_id: int, active_ctx: str) -> str:
     prefix = f"[Your task ID is #{task_id}]"
     if active_ctx:
         prefix += f"\n{active_ctx}"
+    playbook = _detect_playbook(user_text)
+    if playbook:
+        prefix += f"\n\n{playbook}"
     return f"{prefix}\n\n{user_text}"
 
 
@@ -331,7 +336,7 @@ def _run_agent_in_thread(
     human_user_id: int = 0,
     telegram_user_id: int | None = None,
 ) -> None:
-    """Execute the research agent and send the final answer back to the user."""
+    """Execute the task agent and send the final answer back to the user."""
     logger.info("Agent worker START: task #%s '%s' (effort=%s, chat=%s)", task_id, task_title, effort, chat_id)
     telegram_state.set_context(
         chat_id=chat_id,
@@ -360,7 +365,7 @@ def _run_agent_in_thread(
     max_attempts = 1 + AGENT_MAX_RETRIES
     for attempt in range(max_attempts):
         try:
-            body = run_research(query, on_progress=on_progress, effort=effort) or "(No answer produced)"
+            body = run_agent(query, on_progress=on_progress, effort=effort) or "(No answer produced)"
             break
         except Exception as e:
             logger.exception("Agent failed for task %s: %s", task_id, e)
@@ -422,6 +427,11 @@ def _run_agent_in_thread(
         logger.error("Failed to send final answer to chat %s: %s", chat_id, e)
     status = "FAILED" if failed else "COMPLETED"
     logger.info("Agent worker %s: task #%s '%s'", status, task_id, task_title)
+    try:
+        from browser import close_session
+        close_session()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +442,7 @@ def _run_agent_in_thread(
 async def cmd_start(update: Update, context) -> None:
     greeting = (
         BOT_PREFIX
-        + "Welcome to openShrimp — your autonomous research agent.\n\n"
+        + "Welcome to openShrimp — your autonomous task agent.\n\n"
         "Send me any question or research task and I'll work on it until it's done. "
         "No babysitting required — I'll ask you directly if I need clarification.\n\n"
         "Commands:\n"
@@ -965,7 +975,11 @@ def _lookup_chat_id_for_user(user_id: int) -> int | None:
 async def _process_pending_tasks(context) -> None:
     """Pick up pending tasks assigned to the agent and launch workers."""
     try:
-        pending = task_service.list_tasks(status="pending", assignee_id=_agent_user_id)
+        pending = task_service.list_tasks(
+            status="pending",
+            assignee_id=_agent_user_id,
+            scheduled_before=datetime.now(),
+        )
     except Exception as e:
         logger.warning("Failed to list pending tasks: %s", e)
         return
