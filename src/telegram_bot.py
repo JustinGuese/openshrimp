@@ -354,10 +354,15 @@ def _run_agent_in_thread(
             assignee_id=_agent_user_id,
             worker_id=WORKER_ID,
         )
+        task_service.update_heartbeat(task_id)
     except Exception as e:
         logger.warning("Failed to mark task %s in_progress: %s", task_id, e)
 
     def on_progress(tool_name: str, args: dict, observation: str) -> None:
+        try:
+            task_service.update_heartbeat(task_id)
+        except Exception:
+            pass
         _on_progress(tool_name, args, observation, app, chat_id, loop)
 
     failed = False
